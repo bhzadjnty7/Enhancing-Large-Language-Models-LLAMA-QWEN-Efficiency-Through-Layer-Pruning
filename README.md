@@ -18,7 +18,10 @@ The core goal is to accelerate LLM inference without sacrificing output quality.
 2.  **Stage 2: Targeted Healing:** To counteract any performance degradation from pruning, we apply a lightweight QLoRA fine-tuning pass on a small, targeted dataset.
 3.  **Stage 3: Speculative Integration:** The healed, pruned model is then used as an efficient in-model "drafter" within a speculative decoding loop, sharing the KV cache with the original full model to accelerate token generation.
 
-The entire pipeline is visualized below, as proposed in our initial plan:![Project Pipeline](httpso://i.ibb.co/6y18r7b/pipeline.png)
+The entire pipeline is visualized below, as proposed in our initial plan:![Project Pipeline]
+
+<img width="755" height="431" alt="image" src="https://github.com/user-attachments/assets/838c8ac0-522f-4bba-8c7e-ab93dc14266d" />
+
 *> **Figure 1:** Our end-to-end acceleration pipeline. (1) A similarity scan identifies redundant layers for removal. (2) The pruned model is healed via QLoRA. (3) The healed model acts as a drafter for the full LLM in a speculative decoding loop.*
 
 ### Current StatusThis repository currently implements **Part 1: The Layer Pruning Analysis Framework**. The code provides the tools to load popular LLMs, analyze the similarity between their layers, and generate detailed reports recommending which layers are the best candidates for pruning. The implementation of the actual pruning, healing, and speculative decoding stages is planned as future work.
