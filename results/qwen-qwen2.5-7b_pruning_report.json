@@ -1,0 +1,53 @@
+{
+  "model_info": {
+    "model_name": "Qwen/Qwen2.5-7B",
+    "slug": "qwen-qwen2.5-7b",
+    "total_layers": 28,
+    "precision": "bfloat16",
+    "quantization": "none",
+    "device": "cuda",
+    "analysis_date": "2025-08-04T20:47:19.322928"
+  },
+  "key_statistics": {
+    "min_distance": 0.09871178865432739,
+    "max_distance": 0.3256317675113678,
+    "mean_distance": 0.23339433542319707,
+    "std_distance": 0.06713166269284852
+  },
+  "pruning_recommendations": {
+    "10%": {
+      "layers_to_remove": 3,
+      "optimal_start_layer": 15,
+      "optimal_end_layer": 17,
+      "expected_distance": 0.1622578650712967
+    },
+    "20%": {
+      "layers_to_remove": 6,
+      "optimal_start_layer": 12,
+      "optimal_end_layer": 17,
+      "expected_distance": 0.21956031024456024
+    },
+    "30%": {
+      "layers_to_remove": 8,
+      "optimal_start_layer": 11,
+      "optimal_end_layer": 18,
+      "expected_distance": 0.24837525188922882
+    },
+    "40%": {
+      "layers_to_remove": 11,
+      "optimal_start_layer": 8,
+      "optimal_end_layer": 18,
+      "expected_distance": 0.29042723774909973
+    },
+    "50%": {
+      "layers_to_remove": 14,
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 20,
+      "expected_distance": 0.3256317675113678
+    }
+  },
+  "insights": [
+    "Best block: size 1 starting at layer 16 (end 16, distance 0.0987).",
+    "Min/Max/Mean distance: 0.0987 / 0.3256 / 0.2334."
+  ]
+}

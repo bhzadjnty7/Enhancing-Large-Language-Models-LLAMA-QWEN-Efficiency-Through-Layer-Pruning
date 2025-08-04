@@ -1,0 +1,47 @@
+{
+  "model_info": {
+    "model_name": "Qwen/Qwen3-8B",
+    "slug": "qwen-qwen3-8b",
+    "total_layers": 36,
+    "precision": "bfloat16",
+    "quantization": "none",
+    "device": "cuda",
+    "analysis_date": "2025-08-04T22:33:09.813044"
+  },
+  "key_statistics": {
+    "min_distance": 0.06802404671907425,
+    "max_distance": 0.29158514738082886,
+    "mean_distance": 0.20419690059497952,
+    "std_distance": 0.06857949332340046
+  },
+  "pruning_recommendations": {
+    "10%": {
+      "layers_to_remove": 4,
+      "optimal_start_layer": 26,
+      "optimal_end_layer": 29,
+      "expected_distance": 0.1428646445274353
+    },
+    "20%": {
+      "layers_to_remove": 7,
+      "optimal_start_layer": 25,
+      "optimal_end_layer": 31,
+      "expected_distance": 0.19084931910037994
+    },
+    "30%": {
+      "layers_to_remove": 11,
+      "optimal_start_layer": 24,
+      "optimal_end_layer": 34,
+      "expected_distance": 0.25753360986709595
+    },
+    "40%": {
+      "layers_to_remove": 14,
+      "optimal_start_layer": 15,
+      "optimal_end_layer": 28,
+      "expected_distance": 0.2807420790195465
+    }
+  },
+  "insights": [
+    "Best block: size 1 starting at layer 31 (end 31, distance 0.0680).",
+    "Min/Max/Mean distance: 0.0680 / 0.2916 / 0.2042."
+  ]
+}

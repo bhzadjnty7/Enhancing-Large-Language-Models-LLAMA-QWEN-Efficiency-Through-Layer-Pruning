@@ -1,0 +1,53 @@
+{
+  "model_info": {
+    "model_name": "meta-llama/Llama-3.1-8B",
+    "slug": "meta-llama-llama-3.1-8b",
+    "total_layers": 32,
+    "precision": "bfloat16",
+    "quantization": "none",
+    "device": "cuda",
+    "analysis_date": "2025-08-04T22:35:02.540230"
+  },
+  "key_statistics": {
+    "min_distance": 0.0877886712551117,
+    "max_distance": 0.40727779269218445,
+    "mean_distance": 0.2733788788318634,
+    "std_distance": 0.09754045757887346
+  },
+  "pruning_recommendations": {
+    "10%": {
+      "layers_to_remove": 3,
+      "optimal_start_layer": 23,
+      "optimal_end_layer": 25,
+      "expected_distance": 0.15410426259040833
+    },
+    "20%": {
+      "layers_to_remove": 6,
+      "optimal_start_layer": 22,
+      "optimal_end_layer": 27,
+      "expected_distance": 0.23255956172943115
+    },
+    "30%": {
+      "layers_to_remove": 10,
+      "optimal_start_layer": 20,
+      "optimal_end_layer": 29,
+      "expected_distance": 0.31253206729888916
+    },
+    "40%": {
+      "layers_to_remove": 13,
+      "optimal_start_layer": 17,
+      "optimal_end_layer": 29,
+      "expected_distance": 0.36959248781204224
+    },
+    "50%": {
+      "layers_to_remove": 16,
+      "optimal_start_layer": 8,
+      "optimal_end_layer": 23,
+      "expected_distance": 0.40727779269218445
+    }
+  },
+  "insights": [
+    "Best block: size 1 starting at layer 25 (end 25, distance 0.0878).",
+    "Min/Max/Mean distance: 0.0878 / 0.4073 / 0.2734."
+  ]
+}
