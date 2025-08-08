@@ -6,48 +6,58 @@
     "precision": "bfloat16",
     "quantization": "none",
     "device": "cuda",
-    "analysis_date": "2025-08-04T20:42:55.217144"
+    "analysis_date": "2025-08-08T13:27:45.235285"
   },
   "key_statistics": {
-    "min_distance": 0.07919098436832428,
-    "max_distance": 0.2679418623447418,
-    "mean_distance": 0.18995950849992888,
-    "std_distance": 0.05481387127257987
+    "min_distance": 0.08871588855981827,
+    "max_distance": 0.3105200529098511,
+    "mean_distance": 0.21112254494801164,
+    "std_distance": 0.06511228069868132
   },
   "pruning_recommendations": {
     "10%": {
       "layers_to_remove": 3,
-      "optimal_start_layer": 14,
-      "optimal_end_layer": 16,
-      "expected_distance": 0.13319028913974762
+      "optimal_start_layer": 13,
+      "optimal_end_layer": 15,
+      "expected_distance": 0.13732396066188812
     },
     "20%": {
       "layers_to_remove": 6,
-      "optimal_start_layer": 11,
-      "optimal_end_layer": 16,
-      "expected_distance": 0.17671369016170502
+      "optimal_start_layer": 10,
+      "optimal_end_layer": 15,
+      "expected_distance": 0.18190006911754608
     },
     "30%": {
       "layers_to_remove": 8,
-      "optimal_start_layer": 9,
-      "optimal_end_layer": 16,
-      "expected_distance": 0.2030978947877884
+      "optimal_start_layer": 8,
+      "optimal_end_layer": 15,
+      "expected_distance": 0.20875148475170135
     },
     "40%": {
       "layers_to_remove": 11,
-      "optimal_start_layer": 8,
-      "optimal_end_layer": 18,
-      "expected_distance": 0.23617130517959595
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 17,
+      "expected_distance": 0.24959523975849152
     },
     "50%": {
       "layers_to_remove": 14,
       "optimal_start_layer": 7,
       "optimal_end_layer": 20,
-      "expected_distance": 0.2679418623447418
+      "expected_distance": 0.2905411422252655
     }
   },
   "insights": [
-    "Best block: size 1 starting at layer 26 (end 26, distance 0.0792).",
-    "Min/Max/Mean distance: 0.0792 / 0.2679 / 0.1900."
-  ]
+    "Best block: size 1 starting at layer 14 (end 14, distance 0.0887).",
+    "Min/Max/Mean distance: 0.0887 / 0.3105 / 0.2111."
+  ],
+  "dataset_summary": {
+    "domains": {
+      "syntax": 256089,
+      "code": 500155,
+      "math": 445744
+    },
+    "total_texts": 10435,
+    "pad_style": "pad-to-longest-per-batch",
+    "token_max_length": 512
+  }
 }

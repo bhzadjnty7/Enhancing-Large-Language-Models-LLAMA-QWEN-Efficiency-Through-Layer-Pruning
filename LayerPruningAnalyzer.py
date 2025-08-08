@@ -226,6 +226,174 @@ class LayerPruningAnalyzer:
         return num_layers
 
     # -----------------------
+    # 2) Prepare project mix
+    # -----------------------
+
+    def prepare_project_mix(
+            self,
+            token_targets: dict = None,  # e.g., {"syntax": 50_000, "code": 50_000, "math": 50_000}
+            max_length: int = 512,
+            seed: int = 42,
+    ):
+        """
+        Build a raw-text list according to the Project Plan's mixtures.
+        It samples per-domain until ~token_targets[domain] tokens are accumulated,
+        then returns a single length-sorted list for efficient pad-to-longest batching.
+
+        Domains:
+          - "syntax"  -> LM-syntax/general
+          - "code"    -> coding
+          - "math"    -> math/reasoning
+          - "logic"   -> (optional) general logic/commonsense
+
+        Defaults follow the plan: 50k tokens per task.  (Plan §2.2)
+        """
+        import math
+        from datasets import load_dataset
+
+        if token_targets is None:
+            token_targets = {"syntax": 50_000, "code": 50_000, "math": 50_000}
+
+        # --- domain -> list of (dataset_id, split, extractor_fn) ---
+        # You can swap any of these to your exact sources; I supply robust extractors.
+        def _syntx_loader():
+            # LM-syntax fallback: WikiText-2 validation
+            ds = load_dataset("wikitext", name="wikitext-2-raw-v1", split="validation")
+
+            def get_text(ex): return (ex.get("text") or "").strip()
+
+            return ds, get_text
+
+        def _code_loader():
+            # Code: CodeParrot-clean (content) + CodeContests problems; we take whichever loads.
+            try:
+                ds1 = load_dataset("codeparrot/codeparrot-clean", split="train")
+            except Exception:
+                ds1 = None
+            try:
+                ds2 = load_dataset("deepmind/code_contests", split="train")
+            except Exception:
+                ds2 = None
+
+            all_parts = []
+            if ds1 is not None: all_parts.append(
+                ("codeparrot", ds1, lambda ex: (ex.get("content") or ex.get("code") or ex.get("text") or "").strip()))
+            if ds2 is not None: all_parts.append(
+                ("codecontests", ds2, lambda ex: (ex.get("problem") or ex.get("problem_statement") or "").strip()))
+            if not all_parts:
+                # As a final fallback, reuse syntax pool
+                ds_fallback, fn = _syntx_loader()
+                return ds_fallback, fn
+
+            # Simple chained iterator over multiple sources
+            def chained_gen():
+                for _, dsi, _ in all_parts:
+                    for ex in dsi:
+                        yield ex
+
+            class _Chain:
+                def __iter__(self): return chained_gen()
+
+            # extractor tries per-source lambda; use first that returns non-empty
+            def get_text(ex):
+                for _, _, fn in all_parts:
+                    t = fn(ex)
+                    if t: return t
+                return ""
+
+            return _Chain(), get_text
+
+        def _math_loader():
+            # Math/Reasoning: GSM8K questions (stable) + fallback to any "question"-like field
+            try:
+                ds = load_dataset("gsm8k", "main", split="train")
+
+                def get_text(ex):
+                    return (ex.get("question") or ex.get("problem") or ex.get("input") or "").strip()
+
+                return ds, get_text
+            except Exception:
+                # Fallback: Hellaswag contexts (logic-leaning)
+                ds = load_dataset("hellaswag", split="validation")
+
+                def get_text(ex):
+                    return (ex.get("ctx") or "").strip()
+
+                return ds, get_text
+
+        def _logic_loader():
+            # Logic/commonsense: HellaSwag ctx
+            ds = load_dataset("hellaswag", split="validation")
+
+            def get_text(ex): return (ex.get("ctx") or "").strip()
+
+            return ds, get_text
+
+        REGISTRY = {
+            "syntax": _syntx_loader,
+            "code": _code_loader,
+            "math": _math_loader,
+            "logic": _logic_loader,
+        }
+
+        # --- sample until hitting token budget per domain (approximate) ---
+        rng = np.random.default_rng(seed)
+        all_texts = []
+        per_domain_counts = {}
+
+        def _gather_for_domain(domain, target_tokens):
+            ds, get_text = REGISTRY[domain]()
+            picked = []
+            tokens = 0
+            # Lightweight reservoir: iterate & keep non-trivial entries
+            buf = []
+            for ex in ds:
+                t = get_text(ex)
+                if len(t) < 32:  # skip empty/ultra-short
+                    continue
+                buf.append(t)
+                if len(buf) >= 256:
+                    enc = self.tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
+                    for txt, ids in zip(buf, enc["input_ids"]):
+                        tokens += len(ids)
+                        picked.append(txt)
+                        if tokens >= target_tokens:
+                            return picked, tokens
+                    buf.clear()
+            # flush remainder
+            if buf:
+                enc = self.tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
+                for txt, ids in zip(buf, enc["input_ids"]):
+                    tokens += len(ids)
+                    picked.append(txt)
+            return picked, tokens
+
+        for domain, tgt in token_targets.items():
+            if domain not in REGISTRY or tgt <= 0:
+                continue
+            texts, tok_cnt = _gather_for_domain(domain, int(tgt))
+            per_domain_counts[domain] = int(tok_cnt)
+            all_texts.extend(texts)
+
+        # Sort globally by tokenized length (desc) to reduce padding waste per-batch. (Plan §1.2)
+        if not all_texts:
+            print("Warning: project mix produced 0 usable samples.")
+            self.dataset_summary = {"domains": {}, "total_texts": 0}
+            return []
+        enc = self.tokenizer(all_texts, truncation=True, max_length=max_length, add_special_tokens=True)
+        lengths = [len(ids) for ids in enc["input_ids"]]
+        texts_sorted = [t for _, t in sorted(zip(lengths, all_texts), key=lambda x: x[0], reverse=True)]
+
+        self.dataset_summary = {
+            "domains": {k: int(v) for k, v in per_domain_counts.items()},
+            "total_texts": len(texts_sorted),
+            "pad_style": "pad-to-longest-per-batch",
+            "token_max_length": max_length,
+        }
+        print(f"Prepared project mix: {self.dataset_summary}")
+        return texts_sorted
+
+    # -----------------------
     # 2) Prepare dataset
     # -----------------------
     def prepare_dataset(self, num_samples: Optional[int] = None, max_length: int = 512):
@@ -261,7 +429,7 @@ class LayerPruningAnalyzer:
         return texts_sorted
 
     # -----------------------
-    # 3) Extract activations
+    # 4) Extract activations
     # -----------------------
     def extract_layer_representations(
             self,
@@ -271,16 +439,14 @@ class LayerPruningAnalyzer:
             max_length: int = 512,
     ):
         """
-        Register forward hooks and capture per-layer representations at the last non-pad token.
-        Supports:
-          - NEW PATH: tokenized_texts = List[str] (raw texts)  -> we tokenize per-batch with padding='longest'
-          - LEGACY PATH: tokenized_texts = List[Dict[str, Tensor]] -> original behavior (already padded)
+        Supports two inputs:
+          - List[str] raw texts  -> tokenizes per-batch with padding='longest' (recommended)
+          - Legacy List[Dict[str, Tensor]] -> uses pre-padded tensors
         """
         print("Extracting layer representations...")
         layers, embed_layer = _arch_probe(self.model)
         if embed_layer is None:
             raise ValueError("Failed to locate embedding layer for hooks.")
-
         num_layers = len(layers)
         layer_representations: Dict[int, List[torch.Tensor]] = {i: [] for i in range(num_layers + 1)}
 
@@ -293,69 +459,53 @@ class LayerPruningAnalyzer:
 
         with torch.no_grad():
             for i in tqdm(range(0, total, bs), desc="Processing"):
-                try:
-                    if is_legacy:
-                        # ---- Legacy path (pre-padded items) ----
-                        batch = tokenized_texts[i:i + bs]
-                        if not batch:
-                            break
-                        input_ids = torch.cat([b["input_ids"] for b in batch], dim=0).to(self.device)
-                        attention_mask = torch.cat([b["attention_mask"] for b in batch], dim=0).to(self.device)
-                    else:
-                        # ---- New path: per-batch tokenization with padding to longest ----
-                        batch_texts = tokenized_texts[i:i + bs]
-                        if not batch_texts:
-                            break
-                        tok = self.tokenizer(
-                            batch_texts,
-                            truncation=True,
-                            max_length=max_length,
-                            padding=True,  # <-- pad to the longest in this batch
-                            return_tensors="pt"
-                        )
-                        input_ids = tok["input_ids"].to(self.device)
-                        attention_mask = tok["attention_mask"].to(self.device)
+                batch = tokenized_texts[i:i + bs]
+                if not batch:
+                    break
 
-                    activations: Dict[str, torch.Tensor] = {}
-                    hooks = []
+                if is_legacy:
+                    input_ids = torch.cat([b["input_ids"] for b in batch], dim=0).to(self.device)
+                    attention_mask = torch.cat([b["attention_mask"] for b in batch], dim=0).to(self.device)
+                else:
+                    tok = self.tokenizer(
+                        batch,
+                        truncation=True,
+                        max_length=max_length,
+                        padding=True,  # pad-to-longest in this batch
+                        return_tensors="pt"
+                    )
+                    input_ids = tok["input_ids"].to(self.device)
+                    attention_mask = tok["attention_mask"].to(self.device)
 
-                    def get_activation(name):
-                        def hook(_module, _inp, out):
-                            hs = out[0] if isinstance(out, tuple) else out
-                            last_token_idx = attention_mask.sum(dim=1) - 1
-                            bsz = hs.shape[0]
-                            activations[name] = hs[range(bsz), last_token_idx].detach().cpu().float()
+                activations: Dict[str, torch.Tensor] = {}
+                hooks = []
 
-                        return hook
+                def get_activation(name):
+                    def hook(_module, _inp, out):
+                        hs = out[0] if isinstance(out, tuple) else out
+                        last_token_idx = attention_mask.sum(dim=1) - 1
+                        bsz = hs.shape[0]
+                        activations[name] = hs[range(bsz), last_token_idx].detach().cpu().float()
 
-                    # Register hooks
-                    hooks.append(embed_layer.register_forward_hook(get_activation("embedding")))
-                    for li, layer in enumerate(layers):
-                        hooks.append(layer.register_forward_hook(get_activation(f"layer_{li}")))
+                    return hook
 
-                    # Forward pass
-                    _ = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                hooks.append(embed_layer.register_forward_hook(get_activation("embedding")))
+                for li, layer in enumerate(layers):
+                    hooks.append(layer.register_forward_hook(get_activation(f"layer_{li}")))
 
-                    # Collect
-                    if "embedding" in activations:
-                        layer_representations[0].append(activations["embedding"])
-                    for li in range(num_layers):
-                        key = f"layer_{li}"
-                        if key in activations:
-                            layer_representations[li + 1].append(activations[key])
+                _ = self.model(input_ids=input_ids, attention_mask=attention_mask)
 
-                    # Cleanup
-                    for h in hooks:
-                        h.remove()
-                    del input_ids, attention_mask
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                if "embedding" in activations:
+                    layer_representations[0].append(activations["embedding"])
+                for li in range(num_layers):
+                    key = f"layer_{li}"
+                    if key in activations:
+                        layer_representations[li + 1].append(activations[key])
 
-                except Exception as e:
-                    print(f"Error in batch {i}: {e}")
-                    continue
+                for h in hooks: h.remove()
+                del input_ids, attention_mask
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-        # Concatenate lists to tensors
         for k in layer_representations:
             layer_representations[k] = torch.cat(layer_representations[k], dim=0) if layer_representations[k] else torch.empty(0)
 
@@ -510,6 +660,9 @@ class LayerPruningAnalyzer:
             "insights": [],
         }
 
+        if hasattr(self, "dataset_summary"):
+            report["dataset_summary"] = self.dataset_summary
+
         # Provide recommendations for common percentages (inclusive end)
         for percentage in [10, 20, 30, 40, 50]:
             layers_to_remove = int(round(total_layers * percentage / 100.0))
@@ -564,6 +717,7 @@ class LayerPruningAnalyzer:
         max_block_size: Optional[int] = None,
         override_batch_size: Optional[int] = None,
         max_batches: Optional[int] = None,
+        project_token_targets: Optional[dict] = None,  # e.g., {"syntax":50_000,"code":50_000,"math":50_000}
     ) -> Tuple[str, str, Dict]:
         """
         End-to-end process:
@@ -583,7 +737,11 @@ class LayerPruningAnalyzer:
 
         # 2) Data
         print("\n2. Preparing dataset...")
-        tokenized_texts = self.prepare_dataset(num_samples=dataset_samples, max_length=token_max_length)
+        if project_token_targets:
+            raw_texts = self.prepare_project_mix(project_token_targets, max_length=token_max_length)
+            tokenized_texts = raw_texts
+        else:
+            tokenized_texts = self.prepare_dataset(num_samples=dataset_samples, max_length=token_max_length)
 
         # 3) Reps
         print("\n3. Extracting layer representations...")

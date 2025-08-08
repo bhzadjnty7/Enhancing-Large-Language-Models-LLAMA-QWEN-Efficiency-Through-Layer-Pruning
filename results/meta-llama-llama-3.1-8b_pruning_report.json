@@ -6,48 +6,58 @@
     "precision": "bfloat16",
     "quantization": "none",
     "device": "cuda",
-    "analysis_date": "2025-08-04T22:35:02.540230"
+    "analysis_date": "2025-08-08T14:04:07.431939"
   },
   "key_statistics": {
-    "min_distance": 0.0877886712551117,
-    "max_distance": 0.40727779269218445,
-    "mean_distance": 0.2733788788318634,
-    "std_distance": 0.09754045757887346
+    "min_distance": 0.09313984960317612,
+    "max_distance": 0.4155917763710022,
+    "mean_distance": 0.2764459582976997,
+    "std_distance": 0.09619448786883135
   },
   "pruning_recommendations": {
     "10%": {
       "layers_to_remove": 3,
-      "optimal_start_layer": 23,
-      "optimal_end_layer": 25,
-      "expected_distance": 0.15410426259040833
+      "optimal_start_layer": 24,
+      "optimal_end_layer": 26,
+      "expected_distance": 0.16223926842212677
     },
     "20%": {
       "layers_to_remove": 6,
-      "optimal_start_layer": 22,
-      "optimal_end_layer": 27,
-      "expected_distance": 0.23255956172943115
+      "optimal_start_layer": 24,
+      "optimal_end_layer": 29,
+      "expected_distance": 0.23535923659801483
     },
     "30%": {
       "layers_to_remove": 10,
       "optimal_start_layer": 20,
       "optimal_end_layer": 29,
-      "expected_distance": 0.31253206729888916
+      "expected_distance": 0.31192055344581604
     },
     "40%": {
       "layers_to_remove": 13,
       "optimal_start_layer": 17,
       "optimal_end_layer": 29,
-      "expected_distance": 0.36959248781204224
+      "expected_distance": 0.3685944378376007
     },
     "50%": {
       "layers_to_remove": 16,
-      "optimal_start_layer": 8,
-      "optimal_end_layer": 23,
-      "expected_distance": 0.40727779269218445
+      "optimal_start_layer": 3,
+      "optimal_end_layer": 18,
+      "expected_distance": 0.4155917763710022
     }
   },
   "insights": [
-    "Best block: size 1 starting at layer 25 (end 25, distance 0.0878).",
-    "Min/Max/Mean distance: 0.0878 / 0.4073 / 0.2734."
-  ]
+    "Best block: size 1 starting at layer 25 (end 25, distance 0.0931).",
+    "Min/Max/Mean distance: 0.0931 / 0.4156 / 0.2764."
+  ],
+  "dataset_summary": {
+    "domains": {
+      "syntax": 248615,
+      "code": 500053,
+      "math": 435759
+    },
+    "total_texts": 10437,
+    "pad_style": "pad-to-longest-per-batch",
+    "token_max_length": 512
+  }
 }
