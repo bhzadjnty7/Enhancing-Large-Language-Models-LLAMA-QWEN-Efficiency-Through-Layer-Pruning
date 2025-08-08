@@ -118,7 +118,7 @@ class LayerPruningAnalyzer:
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2.5-7B",
-        results_dir: str = "results",
+        results_dir: str = "./results/analysis",
         device: str = "cuda",
         use_8bit: bool = False,             # default: stock model (no quantization)
         use_4bit: bool = False,
@@ -142,8 +142,8 @@ class LayerPruningAnalyzer:
             trust_remote_code: pass-through to HF loaders.
         """
         self.model_name = model_name
-        self.results_dir = results_dir
         self.slug = _slugify(model_name)
+        self.results_dir = results_dir + "/" + self.slug
         self.trust_remote_code = trust_remote_code
 
         self.device = device if torch.cuda.is_available() and device.startswith("cuda") else "cpu"
@@ -696,7 +696,7 @@ class LayerPruningAnalyzer:
             axes[1, 1].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        img_path = f"results/{self.slug}_analysis_results.png"
+        img_path = f"{self.results_dir}/{self.slug}_analysis_results.png"
         plt.savefig(img_path, dpi=300, bbox_inches="tight")
         try:
             from IPython.display import display, Image as IPyImage
@@ -735,8 +735,7 @@ class LayerPruningAnalyzer:
                 "mean_distance": float(np.mean(distances)),
                 "std_distance": float(np.std(distances)),
             },
-            "pruning_recommendations": {},
-            "insights": [],
+            "pruning_recommendations_mixed_dataset": {},
         }
 
         if hasattr(self, "dataset_summary"):
@@ -747,23 +746,14 @@ class LayerPruningAnalyzer:
             layers_to_remove = int(round(total_layers * percentage / 100.0))
             if layers_to_remove in self.optimal_layers:
                 entry = self.optimal_layers[layers_to_remove]
-                report["pruning_recommendations"][f"{percentage}%"] = {
+                report["pruning_recommendations_mixed_dataset"][f"{percentage}%"] = {
                     "layers_to_remove": layers_to_remove,
                     "optimal_start_layer": int(entry["start_layer"]),
                     "optimal_end_layer": int(entry["end_layer_inclusive"]),  # <-- inclusive fix (6b)
                     "expected_distance": float(entry["distance"]),
                 }
 
-        # Light insights
-        if self.optimal_layers:
-            best_block = min(self.optimal_layers.items(), key=lambda kv: kv[1]["distance"])
-            report["insights"] = [
-                f"Best block: size {best_block[0]} starting at layer {best_block[1]['start_layer']} "
-                f"(end {best_block[1]['end_layer_inclusive']}, distance {best_block[1]['distance']:.4f}).",
-                f"Min/Max/Mean distance: {np.min(distances):.4f} / {np.max(distances):.4f} / {np.mean(distances):.4f}.",
-            ]
-
-        out_path = f"results/{self.slug}_pruning_report.json"
+        out_path = f"{self.results_dir}/{self.slug}_pruning_report.json"
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
@@ -776,7 +766,7 @@ class LayerPruningAnalyzer:
         print(f"Maximum angular distance: {np.max(distances):.4f}")
         print(f"Average distance: {np.mean(distances):.4f}")
         print("\nLayer pruning recommendations (inclusive end indices):")
-        for pct, info in report["pruning_recommendations"].items():
+        for pct, info in report["pruning_recommendations_mixed_dataset"].items():
             print(f"\n{pct} pruning:")
             print(f"  - Layers to remove: {info['layers_to_remove']}")
             print(f"  - Optimal start layer: {info['optimal_start_layer']}")
@@ -896,3 +886,360 @@ class LayerPruningAnalyzer:
         print("=" * 60)
 
         return img_path, json_path, report
+
+    # -----------------------
+    # 11) Analyze each task separately
+    # -----------------------
+    def run_multitask_aggregation(
+            self,
+            task_token_targets: dict,  # e.g., {"syntax":50_000, "code":50_000, "math":50_000}
+            max_block_size: int = 16,
+            weights: dict = None,  # e.g., {"syntax":1.0, "code":1.0, "math":1.0}
+            token_max_length: int = 512,
+            batch_size: int = None,
+            num_workers: int = 0,
+    ):
+        """
+        Per-task angular matrices + normalized aggregation (weighted mean & minimax).
+        Saves per-task matrices/best CSVs, aggregate best CSVs, aggregate Z-score matrices, and an 8-subplot figure.
+        """
+        import json
+        import numpy as np
+        import pandas as pd
+        import torch
+        import os
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from dataset_builder import MixtureDataBuilder
+
+        # ---------- outputs root ----------
+        outdir = getattr(self, "results_dir", None)
+        if not outdir:
+            outdir = f"./results/{self.slug}"
+            setattr(self, "results_dir", outdir)
+        os.makedirs(outdir, exist_ok=True)
+
+        # ---------- ensure model/tokenizer ----------
+        if self.model is None:
+            print("\nLoading model...")
+            self.load_model()
+        elif self._tokenizer is None:
+            self.load_tokenizer()
+
+        # ---------- normalize weights ----------
+        tasks = [t for t in task_token_targets.keys() if task_token_targets[t] > 0]
+        if not tasks:
+            raise ValueError("task_token_targets is empty or all zeros.")
+        if weights is None:
+            weights = {t: 1.0 for t in tasks}
+        wsum = sum(weights.get(t, 0.0) for t in tasks)
+        if wsum <= 0:
+            raise ValueError("All task weights are zero.")
+        norm_w = {t: (weights.get(t, 0.0) / wsum) for t in tasks}
+
+        # ---------- per-task runs ----------
+        task_mats = {}  # task -> (B x N) angular matrix (NaN outside valid)
+        task_best = {}  # task -> DataFrame with best per block size
+        num_layers = None
+
+        for task in tasks:
+            print(f"\nTask: {task}  (target tokens ~ {task_token_targets[task]})")
+            builder = MixtureDataBuilder(self._tokenizer, max_length=token_max_length, seed=42, verbose=True)
+            texts, _lengths, summary = builder.build_text_mixture({task: int(task_token_targets[task])})
+            dl = builder.make_dataloader(
+                texts,
+                batch_size=(batch_size or self.batch_size),
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=torch.cuda.is_available(),
+            )
+
+            # Run this task
+            self.extract_layer_representations_from_loader(dl)
+            mat, opt = self.analyze_layer_similarities(max_block_size=max_block_size)
+
+            if num_layers is None:
+                num_layers = mat.shape[1]
+
+            # mask invalid cells with NaN for clarity
+            mat_to_save = mat.copy().astype(float)
+            for bi in range(mat_to_save.shape[0]):  # bi: 0..B-1, block size = bi+1
+                valid_cols = num_layers - (bi + 1) + 1
+                if valid_cols < num_layers:
+                    mat_to_save[bi, valid_cols:] = np.nan
+
+            # save full matrix
+            df_mat = pd.DataFrame(
+                mat_to_save,
+                index=[i for i in range(1, mat_to_save.shape[0] + 1)],
+                columns=[i for i in range(num_layers)]
+            )
+            df_mat.index.name = "block_size"
+            df_mat.to_csv(os.path.join(outdir, f"{self.slug}_task_{task}_angular_matrix.csv"))
+
+            # save per-m best summary
+            rows = []
+            for m in range(1, mat.shape[0] + 1):
+                entry = opt.get(m)
+                if entry:
+                    rows.append({
+                        "task": task,
+                        "block_size": m,
+                        "best_start_layer": int(entry["start_layer"]),
+                        "best_end_layer_inclusive": int(entry["end_layer_inclusive"]),
+                        "best_distance": float(entry["distance"]),
+                    })
+            df_best = pd.DataFrame(rows)
+            df_best.to_csv(os.path.join(outdir, f"{self.slug}_task_{task}_angular_best.csv"), index=False)
+
+            task_mats[task] = mat_to_save
+            task_best[task] = df_best
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # ---------- z-score per task ----------
+        def zscore_valid(mat):
+            v = mat[~np.isnan(mat)]
+            if v.size == 0:
+                return np.full_like(mat, np.nan, dtype=float)
+            mu, sd = float(np.nanmean(v)), float(np.nanstd(v))
+            if sd == 0.0:
+                return np.zeros_like(mat, dtype=float)
+            return (mat - mu) / sd
+
+        z_mats = {t: zscore_valid(task_mats[t]) for t in tasks}
+
+        # ---------- aggregations ----------
+        B = max_block_size
+        N = num_layers
+        stack = np.stack([z_mats[t] for t in tasks], axis=0)  # T x B x N
+        wvec = np.array([norm_w[t] for t in tasks], dtype=float).reshape(-1, 1, 1)
+
+        agg_mean = np.nansum(stack * wvec, axis=0)  # B x N
+        # Avoid All-NaN slice warnings for minimax
+        weighted = stack * wvec  # T x B x N
+        valid = ~np.isnan(weighted)  # T x B x N
+        safe = np.where(valid, weighted, -np.inf)  # fill invalid with -inf so max ignores them
+        agg_minimax = safe.max(axis=0)  # B x N
+        all_nan = ~valid.any(axis=0)  # B x N (true where every task was NaN)
+        agg_minimax[all_nan] = np.nan  # put NaN back where nothing was valid
+
+        # save aggregate Z-Score matrices (mask invalid positions first)
+        def mask_invalid(mat):
+            out = mat.copy()
+            for bi in range(out.shape[0]):
+                valid_cols = N - (bi + 1) + 1
+                if valid_cols < N:
+                    out[bi, valid_cols:] = np.nan
+            return out
+
+        agg_mean_mat = mask_invalid(agg_mean)
+        agg_minimax_mat = mask_invalid(agg_minimax)
+
+        df_agg_mean_mat = pd.DataFrame(
+            agg_mean_mat,
+            index=[i for i in range(1, B + 1)],
+            columns=[i for i in range(N)]
+        )
+        df_agg_mean_mat.index.name = "block_size"
+        df_agg_mean_mat.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_weighted_mean_Z-Score_matrix.csv"))
+
+        df_agg_minimax_mat = pd.DataFrame(
+            agg_minimax_mat,
+            index=[i for i in range(1, B + 1)],
+            columns=[i for i in range(N)]
+        )
+        df_agg_minimax_mat.index.name = "block_size"
+        df_agg_minimax_mat.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_minimax_Z-Score_matrix.csv"))
+
+        # pick best per block size for each aggregation
+        def chosen_per_block(agg_mat, method_name):
+            rows = []
+            for bi in range(B):
+                m = bi + 1
+                valid_cols = N - m + 1
+                if valid_cols <= 0:
+                    continue
+                row = agg_mat[bi, :valid_cols]
+                if np.all(np.isnan(row)):
+                    continue
+                j = int(np.nanargmin(row))
+                start = j
+                end_incl = j + m - 1
+                score = float(row[j])
+                rows.append({
+                    "method": method_name,
+                    "block_size": m,
+                    "weight_json": json.dumps(norm_w),
+                    "chosen_start_layer": start,
+                    "chosen_end_layer_inclusive": end_incl,
+                    "combined_score": score,
+                })
+            return pd.DataFrame(rows)
+
+        df_agg_mean = chosen_per_block(agg_mean, "weighted_mean_z")
+        df_agg_minimax = chosen_per_block(agg_minimax, "minimax_z")
+
+        df_agg_mean.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_weighted_mean.csv"), index=False)
+        df_agg_minimax.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_minimax.csv"), index=False)
+
+        # --------- Update pruning report JSON with aggregate recommendations ---------
+        try:
+            report_path = os.path.join(outdir, f"{self.slug}_pruning_report.json")
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+        except FileNotFoundError:
+            report = {}
+
+        # Ensure sections exist
+        report.setdefault("pruning_recommendations_weighted_mean_z", {})
+        report.setdefault("pruning_recommendations_minimax_z", {})
+
+        total_layers = N  # number of transformer blocks (columns in matrices)
+        for pct in [10, 20, 30, 40, 50]:
+            layers_to_remove = int(round(total_layers * pct / 100.0))
+
+            # Weighted mean
+            row = df_agg_mean[df_agg_mean["block_size"] == layers_to_remove]
+            if not row.empty:
+                start = int(row["chosen_start_layer"].iloc[0])
+                end_incl = int(row["chosen_end_layer_inclusive"].iloc[0])
+                score = float(row["combined_score"].iloc[0])
+                report["pruning_recommendations_weighted_mean_z"][f"{pct}%"] = {
+                    "layers_to_remove": layers_to_remove,
+                    "optimal_start_layer": start,
+                    "optimal_end_layer": end_incl,  # inclusive
+                    "combined_z_score": score
+                }
+
+            # Minimax
+            row = df_agg_minimax[df_agg_minimax["block_size"] == layers_to_remove]
+            if not row.empty:
+                start = int(row["chosen_start_layer"].iloc[0])
+                end_incl = int(row["chosen_end_layer_inclusive"].iloc[0])
+                score = float(row["combined_score"].iloc[0])
+                report["pruning_recommendations_minimax_z"][f"{pct}%"] = {
+                    "layers_to_remove": layers_to_remove,
+                    "optimal_start_layer": start,
+                    "optimal_end_layer": end_incl,  # inclusive
+                    "combined_z_score": score
+                }
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print(f"Updated pruning recommendations in {report_path}")
+
+        # print("\nSaved:")
+        # for task in tasks:
+        #     print(f"  - {os.path.join(outdir, self.slug + f'_task_{task}_angular_matrix.csv')}")
+        #     print(f"  - {os.path.join(outdir, self.slug + f'_task_{task}_angular_best.csv')}")
+        # print(f"  - {os.path.join(outdir, self.slug + '_aggregate_weighted_mean_Z-Score_matrix.csv')}")
+        # print(f"  - {os.path.join(outdir, self.slug + '_aggregate_minimax_Z-Score_matrix.csv')}")
+        # print(f"  - {os.path.join(outdir, self.slug + '_aggregate_weighted_mean.csv')}")
+        # print(f"  - {os.path.join(outdir, self.slug + '_aggregate_minimax.csv')}")
+
+        # ---------- visualization (8 subplots in 2 rows x 4 cols) ----------
+        fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+        axes = np.array(axes).reshape(2, 4)
+
+        # first 3: per-task angular matrices (up to 3 tasks shown)
+        show_tasks = tasks[:3]
+        for k, task in enumerate(show_tasks):
+            ax = axes[0, k]
+            sns.heatmap(task_mats[task], cmap="viridis", ax=ax, cbar=k == 2,
+                        cbar_kws={"label": "Angular Distance"} if k == 2 else None)
+            ax.set_title(f"{task} – Angular Matrix")
+            ax.set_xlabel("Start Layer")
+            ax.set_ylabel("Block Size")
+            ax.set_yticks(np.arange(0.5, B + 0.5, 1))
+            ax.set_yticklabels([str(i) for i in range(1, B + 1)])
+
+        # if fewer than 3 tasks, hide empty slots
+        for k in range(len(show_tasks), 3):
+            axes[0, k].axis("off")
+
+        # next two: aggregate Z-score matrices
+        ax = axes[0, 3]
+        sns.heatmap(agg_mean_mat, cmap="coolwarm", ax=ax, cbar=True, cbar_kws={"label": "Z-Score"})
+        ax.set_title("Aggregate – Weighted Mean (Z)")
+        ax.set_xlabel("Start Layer")
+        ax.set_ylabel("Block Size")
+        ax.set_yticks(np.arange(0.5, B + 0.5, 1))
+        ax.set_yticklabels([str(i) for i in range(1, B + 1)])
+
+        ax = axes[1, 0]
+        sns.heatmap(agg_minimax_mat, cmap="coolwarm", ax=ax, cbar=True, cbar_kws={"label": "Z-Score"})
+        ax.set_title("Aggregate – Minimax (Z)")
+        ax.set_xlabel("Start Layer")
+        ax.set_ylabel("Block Size")
+        ax.set_yticks(np.arange(0.5, B + 0.5, 1))
+        ax.set_yticklabels([str(i) for i in range(1, B + 1)])
+
+        # next: Optimal Distance VS Block size for tasks (line plot)
+        ax = axes[1, 1]
+        for task in show_tasks:
+            dfb = task_best[task]
+            if not dfb.empty:
+                ax.plot(dfb["block_size"], dfb["best_distance"], marker="o", label=task)
+        ax.set_title("Optimal Distance VS Block size (tasks)")
+        ax.set_xlabel("Block Size")
+        ax.set_ylabel("Minimum Angular Distance")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # next: Optimal Z-Score VS Block size for aggregates
+        ax = axes[1, 2]
+        if not df_agg_mean.empty:
+            ax.plot(df_agg_mean["block_size"], df_agg_mean["combined_score"], marker="s", label="weighted_mean_z")
+        if not df_agg_minimax.empty:
+            ax.plot(df_agg_minimax["block_size"], df_agg_minimax["combined_score"], marker="^",
+                    label="minimax_z")
+        ax.set_title("Optimal Z-Score VS Block size (aggregates)")
+        ax.set_xlabel("Block Size")
+        ax.set_ylabel("Combined Z-Score")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # last: Best Starting Layer (tasks + aggregates) – 5 lines possible
+        ax = axes[1, 3]
+        for task in show_tasks:
+            dfb = task_best[task]
+            if not dfb.empty:
+                ax.plot(dfb["block_size"], dfb["best_start_layer"], marker="o", label=f"{task}")
+        if not df_agg_mean.empty:
+            ax.plot(df_agg_mean["block_size"], df_agg_mean["chosen_start_layer"], marker="s", label="weighted_mean_z")
+        if not df_agg_minimax.empty:
+            ax.plot(df_agg_minimax["block_size"], df_agg_minimax["chosen_start_layer"], marker="^",
+                    label="minimax_z")
+        ax.set_title("Best Starting Layer")
+        ax.set_xlabel("Block Size")
+        ax.set_ylabel("Start Layer")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        plt.tight_layout()
+        fig_path = os.path.join(outdir, f"{self.slug}_multitask_aggregation.png")
+        plt.savefig(fig_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        try:
+            # show inline in notebooks
+            from IPython.display import display, Image as IPyImage
+            display(IPyImage(filename=fig_path))
+        except Exception:
+            pass
+
+        return {
+            "per_task_best": task_best,
+            "aggregate": {
+                "weighted_mean_matrix_csv": os.path.join(outdir,
+                                                         f"{self.slug}_aggregate_weighted_mean_Z-Score_matrix.csv"),
+                "minimax_matrix_csv": os.path.join(outdir, f"{self.slug}_aggregate_minimax_Z-Score_matrix.csv"),
+                "weighted_mean_csv": os.path.join(outdir, f"{self.slug}_aggregate_weighted_mean.csv"),
+                "minimax_csv": os.path.join(outdir, f"{self.slug}_aggregate_minimax.csv"),
+                "weights": norm_w,
+                "figure": fig_path,
+                "results_dir": outdir,
+            }
+        }
+
