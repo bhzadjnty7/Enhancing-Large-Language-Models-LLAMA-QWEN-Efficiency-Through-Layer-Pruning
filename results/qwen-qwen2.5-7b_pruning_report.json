@@ -6,58 +6,48 @@
     "precision": "bfloat16",
     "quantization": "none",
     "device": "cuda",
-    "analysis_date": "2025-08-08T13:37:22.583822"
+    "analysis_date": "2025-08-08T17:48:11.347848"
   },
   "key_statistics": {
-    "min_distance": 0.09659300744533539,
-    "max_distance": 0.33179008960723877,
-    "mean_distance": 0.23629871755838394,
-    "std_distance": 0.06935456855933968
+    "min_distance": 0.09723880141973495,
+    "max_distance": 0.33252787590026855,
+    "mean_distance": 0.23681039875373244,
+    "std_distance": 0.06936197526554869
   },
   "pruning_recommendations": {
     "10%": {
       "layers_to_remove": 3,
       "optimal_start_layer": 13,
       "optimal_end_layer": 15,
-      "expected_distance": 0.15399518609046936
+      "expected_distance": 0.1545608639717102
     },
     "20%": {
       "layers_to_remove": 6,
       "optimal_start_layer": 11,
       "optimal_end_layer": 16,
-      "expected_distance": 0.20981833338737488
+      "expected_distance": 0.2100311517715454
     },
     "30%": {
       "layers_to_remove": 8,
       "optimal_start_layer": 10,
       "optimal_end_layer": 17,
-      "expected_distance": 0.24120908975601196
+      "expected_distance": 0.24149073660373688
     },
     "40%": {
       "layers_to_remove": 11,
       "optimal_start_layer": 7,
       "optimal_end_layer": 17,
-      "expected_distance": 0.2734181582927704
+      "expected_distance": 0.2739219069480896
     },
     "50%": {
       "layers_to_remove": 14,
       "optimal_start_layer": 3,
       "optimal_end_layer": 16,
-      "expected_distance": 0.3181203007698059
+      "expected_distance": 0.31896770000457764
     }
   },
   "insights": [
-    "Best block: size 1 starting at layer 16 (end 16, distance 0.0966).",
-    "Min/Max/Mean distance: 0.0966 / 0.3318 / 0.2363."
-  ],
-  "dataset_summary": {
-    "domains": {
-      "syntax": 256089,
-      "code": 500155,
-      "math": 445744
-    },
-    "total_texts": 10435,
-    "pad_style": "pad-to-longest-per-batch",
-    "token_max_length": 512
-  }
+    "Best block: size 1 starting at layer 16 (end 16, distance 0.0972).",
+    "Min/Max/Mean distance: 0.0972 / 0.3325 / 0.2368."
+  ]
 }

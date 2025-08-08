@@ -18,6 +18,8 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
+from dataset_builder import MixtureDataBuilder
+
 # -----------------------
 # Utility helpers
 # -----------------------
@@ -152,7 +154,7 @@ class LayerPruningAnalyzer:
         self.max_samples = int(max(1, max_samples))
 
         self.model = None
-        self.tokenizer = None
+        self._tokenizer = None
         self.layer_outputs: Dict[int, torch.Tensor] = {}
         self.angular_distances: np.ndarray = np.array([])
         self.optimal_layers: Dict[int, Dict[str, float]] = {}
@@ -172,8 +174,34 @@ class LayerPruningAnalyzer:
         # ensure the result path directory exists
         os.makedirs(self.results_dir, exist_ok=True)
 
+    @property
+    def tokenizer(self):
+        # Lazy-load on first access
+        if getattr(self, "_tokenizer", None) is None:
+            self.load_tokenizer()
+        return self._tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value):
+        # Keep backward-compat if something assigns to self.tokenizer
+        self._tokenizer = value
+
     # -----------------------
-    # 1) Load model/tokenizer
+    # 1) Load tokenizer
+    # -----------------------
+
+    def load_tokenizer(self):
+        """Load/configure tokenizer without loading the full model."""
+        if self._tokenizer is None:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name, trust_remote_code=self.trust_remote_code
+            )
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = getattr(self._tokenizer, "eos_token", None) or self._tokenizer.unk_token
+            self._tokenizer.padding_side = "left"
+
+    # -----------------------
+    # 2) Load model
     # -----------------------
     def load_model(self) -> int:
         """Load tokenizer and model with the requested precision/quantization."""
@@ -185,17 +213,10 @@ class LayerPruningAnalyzer:
         gc.collect()
 
         # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name,
-            trust_remote_code=self.trust_remote_code,
-        )
-
-        # Robust padding setup for causal LMs
-        if self.tokenizer.pad_token is None:
-            # Many causal LMs lack a pad token; use EOS safely
-            self.tokenizer.pad_token = getattr(self.tokenizer, "eos_token", None) or self.tokenizer.unk_token
-        # Left padding is usually safer for decoder-only models
-        self.tokenizer.padding_side = "left"
+        if self._tokenizer is None:
+            self.load_tokenizer()
+        else:
+            print("Tokenizer already loaded.")
 
         # Model kwargs: do NOT set dtype twice. If using quantization, omit torch_dtype.
         model_kwargs = {
@@ -353,7 +374,7 @@ class LayerPruningAnalyzer:
                     continue
                 buf.append(t)
                 if len(buf) >= 256:
-                    enc = self.tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
+                    enc = self._tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
                     for txt, ids in zip(buf, enc["input_ids"]):
                         tokens += len(ids)
                         picked.append(txt)
@@ -362,7 +383,7 @@ class LayerPruningAnalyzer:
                     buf.clear()
             # flush remainder
             if buf:
-                enc = self.tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
+                enc = self._tokenizer(buf, truncation=True, max_length=max_length, add_special_tokens=True)
                 for txt, ids in zip(buf, enc["input_ids"]):
                     tokens += len(ids)
                     picked.append(txt)
@@ -380,7 +401,7 @@ class LayerPruningAnalyzer:
             print("Warning: project mix produced 0 usable samples.")
             self.dataset_summary = {"domains": {}, "total_texts": 0}
             return []
-        enc = self.tokenizer(all_texts, truncation=True, max_length=max_length, add_special_tokens=True)
+        enc = self._tokenizer(all_texts, truncation=True, max_length=max_length, add_special_tokens=True)
         lengths = [len(ids) for ids in enc["input_ids"]]
         texts_sorted = [t for _, t in sorted(zip(lengths, all_texts), key=lambda x: x[0], reverse=True)]
 
@@ -394,7 +415,65 @@ class LayerPruningAnalyzer:
         return texts_sorted
 
     # -----------------------
-    # 2) Prepare dataset
+    # 4) Get project mix using loader class
+    # -----------------------
+
+    def extract_layer_representations_from_loader(self, dataloader):
+        """
+        Same capture logic as extract_layer_representations, but consumes a DataLoader
+        that yields dicts with 'input_ids' and 'attention_mask'.
+        """
+        print("Extracting layer representations (DataLoader path)...")
+        layers, embed_layer = _arch_probe(self.model)
+        if embed_layer is None:
+            raise ValueError("Failed to locate embedding layer for hooks.")
+        num_layers = len(layers)
+        layer_representations = {i: [] for i in range(num_layers + 1)}
+
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Processing"):
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+
+                activations = {}
+                hooks = []
+
+                def get_activation(name):
+                    def hook(_module, _inp, out):
+                        hs = out[0] if isinstance(out, tuple) else out
+                        last_token_idx = attention_mask.sum(dim=1) - 1
+                        bsz = hs.shape[0]
+                        activations[name] = hs[range(bsz), last_token_idx].detach().cpu().float()
+
+                    return hook
+
+                hooks.append(embed_layer.register_forward_hook(get_activation("embedding")))
+                for li, layer in enumerate(layers):
+                    hooks.append(layer.register_forward_hook(get_activation(f"layer_{li}")))
+
+                _ = self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+                if "embedding" in activations:
+                    layer_representations[0].append(activations["embedding"])
+                for li in range(num_layers):
+                    key = f"layer_{li}"
+                    if key in activations:
+                        layer_representations[li + 1].append(activations[key])
+
+                for h in hooks: h.remove()
+                del input_ids, attention_mask
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        for k in layer_representations:
+            layer_representations[k] = torch.cat(layer_representations[k], dim=0) if layer_representations[
+                k] else torch.empty(0)
+
+        self.layer_outputs = layer_representations
+        print(f"Extracted representations for {len(layer_representations)} layers (including embeddings).")
+        return layer_representations
+
+    # -----------------------
+    # 5) Prepare dataset
     # -----------------------
     def prepare_dataset(self, num_samples: Optional[int] = None, max_length: int = 512):
         """
@@ -414,7 +493,7 @@ class LayerPruningAnalyzer:
                 texts.append(txt)
 
         # Approximate sequence lengths without padding (for sorting)
-        enc = self.tokenizer(
+        enc = self._tokenizer(
             texts,
             truncation=True,
             max_length=max_length,
@@ -429,7 +508,7 @@ class LayerPruningAnalyzer:
         return texts_sorted
 
     # -----------------------
-    # 4) Extract activations
+    # 6) Extract activations
     # -----------------------
     def extract_layer_representations(
             self,
@@ -467,7 +546,7 @@ class LayerPruningAnalyzer:
                     input_ids = torch.cat([b["input_ids"] for b in batch], dim=0).to(self.device)
                     attention_mask = torch.cat([b["attention_mask"] for b in batch], dim=0).to(self.device)
                 else:
-                    tok = self.tokenizer(
+                    tok = self._tokenizer(
                         batch,
                         truncation=True,
                         max_length=max_length,
@@ -514,7 +593,7 @@ class LayerPruningAnalyzer:
         return layer_representations
 
     # -----------------------
-    # 4) Similarity analysis
+    # 7) Similarity analysis
     # -----------------------
     @staticmethod
     def compute_angular_distance(x1: torch.Tensor, x2: torch.Tensor) -> float:
@@ -570,7 +649,7 @@ class LayerPruningAnalyzer:
         return distance_matrix, optimal_layers
 
     # -----------------------
-    # 5) Visualization
+    # 8) Visualization
     # -----------------------
     def visualize_results(self) -> str:
         """Save four-panel figure and return the image path."""
@@ -629,7 +708,7 @@ class LayerPruningAnalyzer:
         return img_path
 
     # -----------------------
-    # 6) Report
+    # 9) Report
     # -----------------------
     def generate_report(self) -> Dict:
         """Generate a JSON report with inclusive end indices and file names based on the model."""
@@ -708,7 +787,7 @@ class LayerPruningAnalyzer:
         return report
 
     # -----------------------
-    # 7) One-call pipeline
+    # 10) One-call pipeline
     # -----------------------
     def run_full_analysis(
         self,
@@ -718,6 +797,7 @@ class LayerPruningAnalyzer:
         override_batch_size: Optional[int] = None,
         max_batches: Optional[int] = None,
         project_token_targets: Optional[dict] = None,  # e.g., {"syntax":50_000,"code":50_000,"math":50_000}
+        dataloader=None,
     ) -> Tuple[str, str, Dict]:
         """
         End-to-end process:
@@ -733,23 +813,68 @@ class LayerPruningAnalyzer:
 
         # 1) Load
         print("\n1. Loading model...")
-        _ = self.load_model()
+        if self.model is None or self._tokenizer is None:
+            _ = self.load_model()
+        else:
+            print("Model & tokenizer already loaded — skipping.")
 
         # 2) Data
         print("\n2. Preparing dataset...")
-        if project_token_targets:
-            raw_texts = self.prepare_project_mix(project_token_targets, max_length=token_max_length)
-            tokenized_texts = raw_texts
+        dl = None
+        legacy_items = None  # <-- single fallback container for pre-tokenized items
+
+        if dataloader is not None:
+            print("Dataloader already set up...")
+            dl = dataloader
+            # Single source of truth: if caller gave us a DataLoader,
+            # mirror its batch_size and ignore override_batch_size.
+            if getattr(dl, "batch_size", None):
+                self.batch_size = dl.batch_size
+            if override_batch_size is not None:
+                print("Note: override_batch_size is ignored because an external dataloader was provided.")
+
+        elif project_token_targets:
+            builder = MixtureDataBuilder(self._tokenizer, max_length=token_max_length, seed=42)
+            texts_sorted, _lengths, summary = builder.build_text_mixture(project_token_targets)
+            self.dataset_summary = summary
+            dl = builder.make_dataloader(
+                texts_sorted,
+                batch_size=override_batch_size or self.batch_size,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=torch.cuda.is_available(),
+            )
         else:
-            tokenized_texts = self.prepare_dataset(num_samples=dataset_samples, max_length=token_max_length)
+            # Fallback to your existing path (single dataset)
+            data = self.prepare_dataset(num_samples=dataset_samples, max_length=token_max_length)
+            # If this returns raw texts (strings), wrap with a builder DataLoader for pad-to-longest
+            if isinstance(data, list) and data and isinstance(data[0], str):
+                builder = MixtureDataBuilder(self._tokenizer, max_length=token_max_length, seed=42)
+                dl = builder.make_dataloader(
+                    data,
+                    batch_size=override_batch_size or self.batch_size,
+                    shuffle=False,
+                    num_workers=0,
+                    pin_memory=torch.cuda.is_available(),
+                )
+            else:
+                # Legacy path: pre-tokenized dicts from prepare_dataset
+                legacy_items = data
 
         # 3) Reps
         print("\n3. Extracting layer representations...")
-        self.extract_layer_representations(
-            tokenized_texts,
-            batch_size=override_batch_size,
-            max_batches=max_batches,
-        )
+        if dl is not None:
+            self.extract_layer_representations_from_loader(dl)
+        elif legacy_items is not None:
+            # legacy path (pre-tokenized dicts)
+            self.extract_layer_representations(
+                legacy_items,
+                batch_size=override_batch_size,
+                max_batches=max_batches,
+                max_length=token_max_length,
+            )
+        else:
+            raise RuntimeError("No dataset prepared: expected a DataLoader or pre-tokenized items.")
 
         # 4) Similarities
         print("\n4. Analyzing layer similarities...")
