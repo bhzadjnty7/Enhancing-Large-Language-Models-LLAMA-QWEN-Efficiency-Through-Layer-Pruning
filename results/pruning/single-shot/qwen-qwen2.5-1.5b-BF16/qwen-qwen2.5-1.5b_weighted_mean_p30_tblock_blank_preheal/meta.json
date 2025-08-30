@@ -1,0 +1,12 @@
+{
+  "method": "weighted_mean",
+  "strategy": "tblock_blank",
+  "percent": 30,
+  "selected_start": 8,
+  "selected_end_inclusive": 16,
+  "baseline_ppl": 12.408719142264108,
+  "post_ppl": 19.716346366853205,
+  "delta_ppl": 7.307627224589098,
+  "inserted_idx": 8,
+  "rank": 16
+}

@@ -1,0 +1,12 @@
+{
+  "method": "weighted_mean",
+  "strategy": "none",
+  "percent": 20,
+  "selected_start": 11,
+  "selected_end_inclusive": 16,
+  "baseline_ppl": 12.408719142264108,
+  "post_ppl": 13.7107564750729,
+  "delta_ppl": 1.3020373328087924,
+  "inserted_idx": null,
+  "rank": 16
+}

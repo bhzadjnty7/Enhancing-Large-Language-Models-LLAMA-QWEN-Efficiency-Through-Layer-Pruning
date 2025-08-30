@@ -6,44 +6,44 @@
     "precision": "bfloat16",
     "quantization": "none",
     "device": "cuda",
-    "analysis_date": "2025-08-08T21:53:34.458067"
+    "analysis_date": "2025-08-28T20:41:13.497351"
   },
   "key_statistics": {
-    "min_distance": 0.09201273322105408,
-    "max_distance": 0.2941320836544037,
-    "mean_distance": 0.22653855880101523,
-    "std_distance": 0.06081511606397525
+    "min_distance": 0.09147363156080246,
+    "max_distance": 0.2981453537940979,
+    "mean_distance": 0.23059097677469254,
+    "std_distance": 0.06141845836961305
   },
   "pruning_recommendations_mixed_dataset": {
     "10%": {
       "layers_to_remove": 4,
       "optimal_start_layer": 15,
       "optimal_end_layer": 18,
-      "expected_distance": 0.16582146286964417
+      "expected_distance": 0.16613294184207916
     },
     "20%": {
       "layers_to_remove": 7,
       "optimal_start_layer": 15,
       "optimal_end_layer": 21,
-      "expected_distance": 0.2100447118282318
+      "expected_distance": 0.2103733867406845
     },
     "30%": {
       "layers_to_remove": 11,
       "optimal_start_layer": 7,
       "optimal_end_layer": 17,
-      "expected_distance": 0.2567223310470581
+      "expected_distance": 0.25720715522766113
     },
     "40%": {
       "layers_to_remove": 14,
       "optimal_start_layer": 7,
       "optimal_end_layer": 20,
-      "expected_distance": 0.28252682089805603
+      "expected_distance": 0.2829022705554962
     },
     "50%": {
       "layers_to_remove": 18,
       "optimal_start_layer": 17,
       "optimal_end_layer": 34,
-      "expected_distance": 0.2941320836544037
+      "expected_distance": 0.29450008273124695
     }
   },
   "pruning_recommendations_weighted_mean_z": {
@@ -51,31 +51,31 @@
       "layers_to_remove": 4,
       "optimal_start_layer": 15,
       "optimal_end_layer": 18,
-      "combined_z_score": -1.0062046957539121
+      "combined_z_score": -1.0353551405654213
     },
     "20%": {
       "layers_to_remove": 7,
       "optimal_start_layer": 15,
       "optimal_end_layer": 21,
-      "combined_z_score": -0.4307387108951079
+      "combined_z_score": -0.4642305233654997
     },
     "30%": {
       "layers_to_remove": 11,
       "optimal_start_layer": 7,
       "optimal_end_layer": 17,
-      "combined_z_score": 0.24501544497300873
+      "combined_z_score": 0.20711763237709657
     },
     "40%": {
       "layers_to_remove": 14,
       "optimal_start_layer": 21,
       "optimal_end_layer": 34,
-      "combined_z_score": 0.5315510566934081
+      "combined_z_score": 0.49079163223582367
     },
     "50%": {
       "layers_to_remove": 18,
       "optimal_start_layer": 17,
       "optimal_end_layer": 34,
-      "combined_z_score": 0.6909549085316226
+      "combined_z_score": 0.6550112223805837
     }
   },
   "pruning_recommendations_minimax_z": {
@@ -83,31 +83,31 @@
       "layers_to_remove": 4,
       "optimal_start_layer": 15,
       "optimal_end_layer": 18,
-      "combined_z_score": -0.2973524237482753
+      "combined_z_score": -0.3078052656367548
     },
     "20%": {
       "layers_to_remove": 7,
       "optimal_start_layer": 15,
       "optimal_end_layer": 21,
-      "combined_z_score": -0.11454815868984122
+      "combined_z_score": -0.12211385732637493
     },
     "30%": {
       "layers_to_remove": 11,
       "optimal_start_layer": 13,
       "optimal_end_layer": 23,
-      "combined_z_score": 0.12037268025491522
+      "combined_z_score": 0.10688006156298803
     },
     "40%": {
       "layers_to_remove": 14,
       "optimal_start_layer": 7,
       "optimal_end_layer": 20,
-      "combined_z_score": 0.2192000640086166
+      "combined_z_score": 0.20326024549517543
     },
     "50%": {
       "layers_to_remove": 18,
-      "optimal_start_layer": 17,
-      "optimal_end_layer": 34,
-      "combined_z_score": 0.27725254814108685
+      "optimal_start_layer": 16,
+      "optimal_end_layer": 33,
+      "combined_z_score": 0.2736984064039314
     }
   }
 }

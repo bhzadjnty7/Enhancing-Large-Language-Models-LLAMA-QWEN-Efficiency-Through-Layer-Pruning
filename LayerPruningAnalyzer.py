@@ -441,7 +441,7 @@ class LayerPruningAnalyzer:
                 def get_activation(name):
                     def hook(_module, _inp, out):
                         hs = out[0] if isinstance(out, tuple) else out
-                        last_token_idx = attention_mask.sum(dim=1) - 1
+                        last_token_idx = torch.clamp(attention_mask.sum(1)-1, min=0)
                         bsz = hs.shape[0]
                         activations[name] = hs[range(bsz), last_token_idx].detach().cpu().float()
 
@@ -562,7 +562,7 @@ class LayerPruningAnalyzer:
                 def get_activation(name):
                     def hook(_module, _inp, out):
                         hs = out[0] if isinstance(out, tuple) else out
-                        last_token_idx = attention_mask.sum(dim=1) - 1
+                        last_token_idx = torch.clamp(attention_mask.sum(1)-1, min=0)
                         bsz = hs.shape[0]
                         activations[name] = hs[range(bsz), last_token_idx].detach().cpu().float()
 
