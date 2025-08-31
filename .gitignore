@@ -308,3 +308,5 @@ pyrightconfig.json
 
 # All safetensors models
 **/*.safetensors
+
+results/pruning/**/README.md

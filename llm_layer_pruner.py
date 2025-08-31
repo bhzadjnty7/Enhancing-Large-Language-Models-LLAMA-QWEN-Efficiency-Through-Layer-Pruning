@@ -11,6 +11,7 @@ from tqdm import tqdm
 import contextlib
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 
 
 # --------- Minimal architecture probe (LLama/Qwen/NeoX-style) ----------
@@ -25,6 +26,67 @@ def _arch_probe(model):
         return model.gpt_neox.layers, model.gpt_neox.embed_in
     raise ValueError("Unsupported architecture: could not locate decoder layers and embeddings.")
 
+
+# --------- Dataloader wrapper for Trainer ----------
+class _LoaderDataset(torch.utils.data.IterableDataset):
+    """
+    Wrap an existing DataLoader's underlying iterable to feed Trainer
+    without rebuilding your dataset pipeline.
+    """
+    def __init__(self, dataloader):
+        super().__init__()
+        self._dl = dataloader
+    def __iter__(self):
+        for batch in self._dl:
+            yield batch
+
+
+class _UnbatchedIterable(torch.utils.data.IterableDataset):
+    """
+    Wrap an existing DataLoader that yields dict batches and expose *examples*.
+    Each __iter__ yields dicts with tensors shaped [S] (no batch dim).
+    """
+
+    def __init__(self, dataloader):
+        super().__init__()
+        self.dl = dataloader
+
+    def __iter__(self):
+        for batch in self.dl:
+            # assume batch is a dict of tensors [B, S]
+            bsz = batch["input_ids"].size(0)
+            for i in range(bsz):
+                yield {k: v[i] for k, v in batch.items()}
+
+    def __len__(self):
+        try:
+            n_batches = len(self.dl)
+            bsz = getattr(self.dl, "batch_size", None)
+            if bsz is not None:
+                return n_batches * int(bsz)
+        except TypeError:
+            pass
+        # fallback if unknown — gives finite epoch and sensible progress
+        return 0
+
+
+def make_leftpad_collator(pad_id: int):
+    def _collate(features, return_tensors="pt"):
+        import torch
+        # features: list of per-example dicts with 1D tensors [S]
+        max_len = max(x["input_ids"].shape[0] for x in features)
+
+        def lp(x, L):
+            if x.shape[0] == L: return x
+            pad = x.new_full((L - x.shape[0],), pad_id)
+            return torch.cat([pad, x], dim=0)
+
+        input_ids = torch.stack([lp(f["input_ids"], max_len) for f in features], dim=0)
+        attn      = torch.stack([lp(f["attention_mask"], max_len) for f in features], dim=0)
+        labels    = input_ids.clone()
+        labels[attn == 0] = -100
+        return {"input_ids": input_ids, "attention_mask": attn, "labels": labels}
+    return _collate
 
 # --------- The pruner class ----------------------------------------------------------
 class LLMLayerPruner:
@@ -1141,7 +1203,16 @@ class LLMLayerPruner:
                         eval_loader = self._pick_eval_loader(train_dataloader, eval_dataloader)
                         ppl_before = self.compute_perplexity(eval_loader, model=m)
 
-                    ppl_after = self.heal_inserted_layer(
+                    # Use custom fine-tuning
+                    # ppl_after = self.heal_inserted_layer(
+                    #     m, inserted_idx,
+                    #     train_dataloader=train_dataloader,
+                    #     eval_dataloader=eval_dataloader,
+                    #     max_steps=max_steps, lr=lr, grad_accum=grad_accum
+                    # )
+
+                    # Use Trainer
+                    ppl_after = self.heal_inserted_layer_trainer(
                         m, inserted_idx,
                         train_dataloader=train_dataloader,
                         eval_dataloader=eval_dataloader,
@@ -1272,10 +1343,17 @@ class LLMLayerPruner:
                 ppl1_before = self.compute_perplexity(eval_loader, model=m1)
 
             adapt_dir1 = os.path.join(self.results_dir, f"{slug}_{agg_name}_p{full_heal_percent}_none_qlora")
-            q1 = self.full_heal_qLoRA(m1, train_dataloader, eval_dataloader=eval_loader,
-                                      max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
-                                      dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
-                                      save_dir=adapt_dir1)
+            # Use custom finetuning
+            # q1 = self.full_heal_qLoRA(m1, train_dataloader, eval_dataloader=eval_loader,
+            #                           max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+            #                           dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
+            #                           save_dir=adapt_dir1)
+            # Use Trainer
+            q1 = self.full_heal_qLoRA_trainer(m1, train_dataloader, eval_dataloader=eval_loader,
+                                               max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+                                               dropout=qlora_dropout, target_modules=target_modules,
+                                               grad_accum=grad_accum, save_dir=adapt_dir1)
+
             ppl1_after = q1.get("ppl", None) or self.compute_perplexity(eval_loader or train_dataloader, model=m1)
             variants_all.append({
                 "variant": "none",
@@ -1310,10 +1388,16 @@ class LLMLayerPruner:
                 ppl2_before = self.compute_perplexity(eval_loader, model=m2)
 
             adapt_dir2 = os.path.join(self.results_dir, f"{slug}_{agg_name}_p{full_heal_percent}_tblock_blank_preheal_qlora")
-            q2 = self.full_heal_qLoRA(m2, train_dataloader, eval_dataloader=eval_loader,
-                                      max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
-                                      dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
-                                      save_dir=adapt_dir2)
+            # Use custom finetuning
+            # q2 = self.full_heal_qLoRA(m2, train_dataloader, eval_dataloader=eval_loader,
+            #                           max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+            #                           dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
+            #                           save_dir=adapt_dir2)
+            # Use Trainer
+            q2 = self.full_heal_qLoRA_trainer(m2, train_dataloader, eval_dataloader=eval_loader,
+                                              max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+                                              dropout=qlora_dropout, target_modules=target_modules,
+                                              grad_accum=grad_accum, save_dir=adapt_dir2)
             ppl2_after = q2.get("ppl", None) or self.compute_perplexity(eval_loader or train_dataloader, model=m2)
             variants_all.append({
                 "variant": "tblock_blank_preheal",
@@ -1361,10 +1445,16 @@ class LLMLayerPruner:
 
             ppl3_before = float(best_row["ppl_after_heal"])
             adapt_dir3 = os.path.join(self.results_dir, f"{slug}_{best_row['method']}_p{full_heal_percent}_{strat_best}_healed_qlora")
-            q3 = self.full_heal_qLoRA(m3, train_dataloader, eval_dataloader=eval_loader,
-                                      max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
-                                      dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
-                                      save_dir=adapt_dir3)
+            # Use custom finetuning
+            # q3 = self.full_heal_qLoRA(m3, train_dataloader, eval_dataloader=eval_loader,
+            #                           max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+            #                           dropout=qlora_dropout, target_modules=target_modules, grad_accum=grad_accum,
+            #                           save_dir=adapt_dir3)
+            # Use Trainer
+            q3 = self.full_heal_qLoRA_trainer(m3, train_dataloader, eval_dataloader=eval_loader,
+                                              max_steps=max_qlora_steps, lr=qlora_lr, r=qlora_r, alpha=qlora_alpha,
+                                              dropout=qlora_dropout, target_modules=target_modules,
+                                              grad_accum=grad_accum, save_dir=adapt_dir3)
             ppl3_after = q3.get("ppl", None) or self.compute_perplexity(eval_loader or train_dataloader, model=m3)
             variants_all.append({
                 "variant": f"{strat_best}_post_single_layer_heal",
@@ -1397,3 +1487,247 @@ class LLMLayerPruner:
             json.dump(log, f, indent=2)
 
         return pd.DataFrame(variants_all)
+
+    # --- Using Trainer ---
+    def _freeze_all_but(self, model, module):
+        for p in model.parameters():
+            p.requires_grad_(False)
+        for p in module.parameters():
+            p.requires_grad_(True)
+
+    def _masking_collator(self):
+        """
+        Returns a collator that:
+          - preserves input_ids/attention_mask from your DataLoader batches
+          - creates labels with pads masked to -100 (like your current code)
+        """
+
+        def collate(features):
+            # features already dicts with 'input_ids', 'attention_mask' tensors
+            input_ids = torch.stack([f["input_ids"] for f in features], dim=0)
+            attention_mask = torch.stack([f["attention_mask"] for f in features], dim=0)
+            labels = input_ids.clone()
+            labels[attention_mask == 0] = -100
+            return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+        return collate
+
+    def heal_inserted_layer_trainer(
+            self,
+            model,
+            inserted_idx: int,
+            train_dataloader,
+            eval_dataloader=None,
+            max_steps: int = 500,
+            lr: float = 2e-4,
+            grad_accum: int = 1,
+            log_dir: Optional[str] = None,
+    ) -> float:
+        from transformers import Trainer, TrainingArguments
+
+        # Freeze everything but the inserted layer (same as manual)
+        parent, layers = self._get_layer_container_and_list(model)
+        train_layer = layers[inserted_idx]
+        comp_dtype = self._infer_compute_dtype(model)
+        dev = next(model.parameters()).device
+        train_layer.to(device=dev, dtype=comp_dtype)
+        for p in model.parameters(): p.requires_grad_(False)
+        for p in train_layer.parameters(): p.requires_grad_(True)
+
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+        model.train()
+
+        # Let Trainer see per-*example* items, not pre-batched dicts
+        train_ds = _UnbatchedIterable(train_dataloader)
+        eval_ds = _UnbatchedIterable(eval_dataloader) if eval_dataloader is not None else None
+
+        # Use the smallest per-device batch here; your outer dataloader already handled memory
+        args = TrainingArguments(
+            output_dir=log_dir or os.path.join(self.results_dir, "trainer_heal_tmp"),
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=grad_accum,
+            learning_rate=lr,
+            num_train_epochs=1,  # we drive with max_steps
+            max_steps=max_steps,
+            logging_steps=max(1, max_steps // 20),
+            eval_strategy="no",  # do eval after training via your compute_perplexity
+            save_strategy="no",
+            remove_unused_columns=False,  # IMPORTANT for passing our dict as-is
+            report_to=[],
+            fp16=(comp_dtype == torch.float16),
+            bf16=(comp_dtype == torch.bfloat16),
+            dataloader_pin_memory=True,
+            label_names=["labels"],
+        )
+
+        # Build an optimizer for just the train_layer parameters (keeps rest frozen)
+        opt = torch.optim.AdamW([p for p in train_layer.parameters() if p.requires_grad], lr=lr)
+
+        trainer = Trainer(
+            model=model,
+            args=args,
+            train_dataset=train_ds,
+            eval_dataset=eval_ds,
+            data_collator=make_leftpad_collator(self.tokenizer.pad_token_id),
+            optimizers=(opt, None),
+        )
+
+        trainer.train()
+
+        # Evaluate perplexity using your existing path (consistent with pre/post evals)
+        model.eval()
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = True
+        eval_loader = self._pick_eval_loader(train_dataloader, eval_dataloader)
+        ppl = self.compute_perplexity(eval_loader, model=model)
+
+        # Re-freeze trained layer afterwards
+        for p in train_layer.parameters(): p.requires_grad_(False)
+        return ppl
+
+    def full_heal_qLoRA_trainer(
+            self,
+            model,
+            train_dataloader,
+            eval_dataloader=None,
+            max_steps: int = 1000,
+            lr: float = 1e-4,
+            r: int = 16,
+            alpha: int = 32,
+            dropout: float = 0.05,
+            target_modules: Optional[List[str]] = None,
+            grad_accum: int = 1,
+            save_dir: Optional[str] = None,
+    ) -> Dict:
+        """
+        Trainer-based QLoRA:
+          - prepare k-bit model for training
+          - wrap with PEFT
+          - train via Trainer with our masking collator (per-example; left-pad; pad->-100)
+          - save adapters; PPL via compute_perplexity (merge fast-path when safe)
+        """
+        out = {"ok": False, "error": None, "adapter_path": None, "ppl": None}
+        try:
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+            from transformers import Trainer, TrainingArguments
+        except Exception as e:
+            out["error"] = f"Missing deps (peft/transformers): {e}"
+            return out
+
+        if target_modules is None:
+            target_modules = [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+                "w1", "w2", "w3", "dense_h_to_4h", "dense_4h_to_h"
+            ]
+
+        # ---- training prep (important for k-bit) ----
+        model.train()
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+        try:
+            model = prepare_model_for_kbit_training(model)  # enables grad ckpt + input grads when available
+        except Exception:
+            pass
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+
+        lconf = LoraConfig(
+            r=r, lora_alpha=alpha, lora_dropout=dropout,
+            target_modules=target_modules, bias="none", task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lconf)
+
+        # Ensure LoRA trainables are in bf16/fp16 (never fp32) for stability + speed
+        comp_dtype = (torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+                      else torch.float16)
+        for n, p in model.named_parameters():
+            if p.requires_grad and p.is_floating_point() and p.dtype != comp_dtype:
+                p.data = p.data.to(comp_dtype)
+
+        # ---- Trainer plumbing: make the Trainer see *examples*, not pre-batched dicts ----
+        train_ds = _UnbatchedIterable(train_dataloader)
+        eval_ds = _UnbatchedIterable(eval_dataloader) if eval_dataloader is not None else None
+        collator = make_leftpad_collator(self.tokenizer.pad_token_id)
+
+        args = TrainingArguments(
+            output_dir=save_dir or os.path.join(self.results_dir, "qlora_adapters"),
+            per_device_train_batch_size=1,  # we already control memory via upstream loader
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=grad_accum,
+            learning_rate=lr,
+            max_steps=max_steps,
+            lr_scheduler_type="cosine",
+            warmup_ratio=0.10,
+            logging_steps=max(1, max_steps // 20),
+            save_strategy="no",  # save adapters manually post-train
+            remove_unused_columns=False,  # keep our dict keys intact
+            report_to=[],  # no W&B by default
+            fp16=(comp_dtype == torch.float16),
+            bf16=(comp_dtype == torch.bfloat16),
+            dataloader_pin_memory=True,
+            eval_strategy="no",
+            label_names=["labels"],  # avoid PEFT label_names warning
+        )
+
+        opt = torch.optim.AdamW(model.parameters(), lr=lr)
+
+        trainer = Trainer(
+            model=model,
+            args=args,
+            train_dataset=train_ds,
+            eval_dataset=eval_ds,
+            data_collator=collator,
+            optimizers=(opt, None),
+        )
+
+        trainer.train()
+
+        # ---- save adapters BEFORE any merge attempt ----
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            try:
+                model.save_pretrained(save_dir)
+                out["adapter_path"] = save_dir
+            except Exception as e:
+                out["error"] = f"Failed to save adapters: {e}"
+                return out
+
+        # ---- fast eval: prefer merged weights when base isn't 4-bit ----
+        eval_loader = eval_dataloader or train_dataloader
+        if eval_loader is not None:
+            eval_model = model
+            merged = None
+            try:
+                is_4bit_base = getattr(getattr(model, "base_model", model), "is_loaded_in_4bit", False)
+                if hasattr(model, "merge_and_unload") and not is_4bit_base:
+                    merged = model.merge_and_unload()
+                    merged.to(self.device).eval()
+                    if hasattr(merged.config, "use_cache"): merged.config.use_cache = True
+                    if hasattr(merged, "gradient_checkpointing_disable"): merged.gradient_checkpointing_disable()
+                    eval_model = merged
+            except Exception:
+                pass
+
+            if eval_model is model:
+                # fallback: PEFT-wrapped eval but make it lightweight
+                model.eval()
+                if hasattr(model, "gradient_checkpointing_disable"): model.gradient_checkpointing_disable()
+                for p in model.parameters(): p.requires_grad_(False)
+                if hasattr(model.config, "use_cache"): model.config.use_cache = True
+
+            out["ppl"] = self.compute_perplexity(eval_loader, model=eval_model)
+
+            if merged is not None:
+                del merged
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+            gc.collect()
+
+        out["ok"] = True
+        return out
+
+
