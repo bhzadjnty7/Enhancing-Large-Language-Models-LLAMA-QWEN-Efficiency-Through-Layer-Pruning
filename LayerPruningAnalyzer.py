@@ -143,7 +143,12 @@ class LayerPruningAnalyzer:
         """
         self.model_name = model_name
         self.slug = _slugify(model_name)
-        self.results_dir = results_dir + "/" + self.slug
+        base = (results_dir or ".").rstrip("/\\")
+        if base.endswith(self.slug):
+            self.results_dir = base
+        else:
+            self.results_dir = os.path.join(base, self.slug)
+        os.makedirs(self.results_dir, exist_ok=True)
         self.trust_remote_code = trust_remote_code
 
         self.device = device if torch.cuda.is_available() and device.startswith("cuda") else "cpu"
@@ -411,7 +416,7 @@ class LayerPruningAnalyzer:
             "pad_style": "pad-to-longest-per-batch",
             "token_max_length": max_length,
         }
-        print(f"Prepared project mix: {self.dataset_summary}")
+        # print(f"Prepared project mix: {self.dataset_summary}")
         return texts_sorted
 
     # -----------------------
@@ -1242,4 +1247,42 @@ class LayerPruningAnalyzer:
                 "results_dir": outdir,
             }
         }
+
+    def ensure_aggregate_csvs_for_tasks(
+        self,
+        task_token_targets: dict,
+        *,
+        outdir: Optional[str] = None,
+        max_block_size: int = 15,
+        weights: Optional[Dict[str, float]] = None,
+        token_max_length: int = 512,
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, str]:
+        """
+        Convenience wrapper for single-flow use:
+        Runs multi-task aggregation and returns the CSV paths it produced.
+        """
+        # If caller provided an outdir, normalize it into analyzer.results_dir
+        if outdir is not None:
+            base = outdir.rstrip("/\\")
+            # Only append slug if not already present
+            self.results_dir = base if base.endswith(self.slug) else os.path.join(base, self.slug)
+            os.makedirs(self.results_dir, exist_ok=True)
+
+        if batch_size is None:
+            batch_size = self.batch_size
+
+        result = self.run_multitask_aggregation(
+            task_token_targets=task_token_targets,
+            max_block_size=max_block_size,
+            weights=weights or {},
+            token_max_length=token_max_length,
+            batch_size=batch_size,
+        )
+        # We already save CSVs inside run_multitask_aggregation; return paths:
+        csvs = {
+            "weighted_mean": os.path.join(self.results_dir, f"{self.slug}_aggregate_weighted_mean.csv"),
+            "minimax": os.path.join(self.results_dir, f"{self.slug}_aggregate_minimax.csv"),
+        }
+        return csvs
 

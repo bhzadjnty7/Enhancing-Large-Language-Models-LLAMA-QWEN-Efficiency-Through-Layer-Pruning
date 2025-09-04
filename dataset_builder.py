@@ -9,6 +9,35 @@ from torch.utils.data import Dataset, DataLoader
 import os
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+def collate_with_labels(tokenizer, max_length: int):
+    """
+    Trainer-native collator: pad-to-longest with tokenizer and create labels
+    with -100 on pad positions. No re-tokenization overhead beyond batch tokenization.
+    """
+    def _collate(batch_texts):
+        tok = tokenizer(
+            batch_texts,
+            truncation=True,
+            max_length=max_length,
+            padding=True,           # pad to longest in *this* batch
+            return_tensors="pt"
+        )
+        input_ids = tok["input_ids"]
+        attention = tok["attention_mask"]
+        labels = input_ids.clone()
+        labels[attention == 0] = -100
+        return {"input_ids": input_ids, "attention_mask": attention, "labels": labels}
+    return _collate
+
+
+class TextListMapDataset(Dataset):
+    """Map-style dataset that returns one raw text per index (tokenized in collator)."""
+    def __init__(self, texts):
+        self.texts = list(texts)
+    def __len__(self): return len(self.texts)
+    def __getitem__(self, idx): return self.texts[idx]
+
+
 class TextListDataset(Dataset):
     def __init__(self, texts: List[str], lengths: Optional[List[int]] = None):
         self.texts = texts
@@ -390,3 +419,10 @@ class MixtureDataBuilder:
                 shuffle=shuffle,  # keep False to preserve length-sorted batches
             )
         return dls
+
+    def as_trainer_dataset(self, texts_sorted):
+        """
+        Return a map-style dataset for Trainer (one text per item).
+        Trainer will build the DataLoader and call our collator to tokenize/pad/label.
+        """
+        return TextListMapDataset(texts_sorted)

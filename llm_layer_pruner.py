@@ -1,6 +1,6 @@
 # llm_layer_pruner.py
 import os, json, math, gc, inspect
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -12,19 +12,22 @@ import contextlib
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from transformers import TrainerCallback, TrainerState, TrainerControl
 
+from LayerPruningAnalyzer import _arch_probe
+from dataset_builder import TextListMapDataset, collate_with_labels  # <-- uses your builder's single source of truth
 
 # --------- Minimal architecture probe (LLama/Qwen/NeoX-style) ----------
-def _arch_probe(model):
-    if hasattr(model, "model") and hasattr(model.model, "layers") and hasattr(model.model, "embed_tokens"):
-        return model.model.layers, model.model.embed_tokens
-    if hasattr(model, "layers") and hasattr(model, "embed_tokens"):
-        return model.layers, model.embed_tokens
-    if hasattr(model, "transformer") and hasattr(model.transformer, "h") and hasattr(model.transformer, "wte"):
-        return model.transformer.h, model.transformer.wte
-    if hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers") and hasattr(model.gpt_neox, "embed_in"):
-        return model.gpt_neox.layers, model.gpt_neox.embed_in
-    raise ValueError("Unsupported architecture: could not locate decoder layers and embeddings.")
+# def _arch_probe(model):
+#     if hasattr(model, "model") and hasattr(model.model, "layers") and hasattr(model.model, "embed_tokens"):
+#         return model.model.layers, model.model.embed_tokens
+#     if hasattr(model, "layers") and hasattr(model, "embed_tokens"):
+#         return model.layers, model.embed_tokens
+#     if hasattr(model, "transformer") and hasattr(model.transformer, "h") and hasattr(model.transformer, "wte"):
+#         return model.transformer.h, model.transformer.wte
+#     if hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers") and hasattr(model.gpt_neox, "embed_in"):
+#         return model.gpt_neox.layers, model.gpt_neox.embed_in
+#     raise ValueError("Unsupported architecture: could not locate decoder layers and embeddings.")
 
 
 # --------- Dataloader wrapper for Trainer ----------
@@ -87,6 +90,79 @@ def make_leftpad_collator(pad_id: int):
         labels[attn == 0] = -100
         return {"input_ids": input_ids, "attention_mask": attn, "labels": labels}
     return _collate
+
+class _CountingCollator:
+    def __init__(self, base_collator, counter_dict: dict):
+        self.base = base_collator
+        self.counter = counter_dict  # expects {"micro_batches": 0, "tokens": 0}
+    def __call__(self, features):
+        self.counter["micro_batches"] += 1
+        # optional: rough token count = sum of lengths pre-padding
+        try:
+            self.counter["tokens"] += sum(len(f["input_ids"]) for f in features if "input_ids" in f)
+        except Exception:
+            pass
+        return self.base(features)
+
+def _extract_texts_from_loader(dl):
+    """
+    Expect a MixtureDataBuilder-made DataLoader (dataset holds raw texts).
+    Falls back to raising a clear error if we can't access texts without unbatching.
+    """
+    # Common case: your builder uses TextListDataset with .texts
+    ds = getattr(dl, "dataset", None)
+    texts = getattr(ds, "texts", None)
+    if isinstance(texts, list) and texts and isinstance(texts[0], str):
+        return texts
+    raise TypeError(
+        "heal_*_trainer expects loaders built by MixtureDataBuilder (dataset.texts must exist); "
+        "please pass such a loader or switch to builder.as_trainer_dataset()."
+    )
+
+# --- Count batches processed in Trainer just to make sure ---
+class StepAccountingCallback(TrainerCallback):
+    """
+    Counts micro-batches and optimizer steps robustly across HF versions.
+
+    - micro_batches: incremented at the end of EACH gradient-accumulation substep
+    - optimizer_steps: incremented at the end of EACH optimizer update
+    """
+    def __init__(self, grad_accum: int):
+        self.grad_accum = max(1, int(grad_accum))
+        self.micro_batches = 0
+        self.optimizer_steps = 0
+
+    # ---- v4.41+ emits this per micro-batch (preferred) ----
+    def on_substep_end(self, args, state, control, **kwargs):
+        # print("Going through substep_end")
+        self.micro_batches += 1
+
+    # ---- fallback for older versions: try train_batch_end ----
+    # Some older Trainer versions surface only train-batch events.
+    def on_train_batch_end(self, args, state, control, **kwargs):
+        # Only use this path if on_substep_end hasn't run in this process
+        if not hasattr(self, "_seen_substep") or not self._seen_substep:
+            # print("Going through batch_end")
+            self.micro_batches += 1
+
+    def on_substep_begin(self, *a, **k):
+        # mark that substep callbacks exist in this runtime
+        self._seen_substep = True
+
+    # ---- one per optimizer update ----
+    def on_step_end(self, args, state, control, **kwargs):
+        # print("Finishing a Full Step")
+        self.optimizer_steps += 1
+        self.micro_batches += 1
+
+    # Print a single, trustworthy line at train end
+    def on_train_end(self, args, state, control, **kwargs):
+        denom = max(1, self.optimizer_steps)
+        ratio = self.micro_batches / denom
+        print(f"[Accounting] optimizer_steps={self.optimizer_steps}  "
+              f"micro_batches={self.micro_batches}  grad_accum={self.grad_accum}  "
+              f"(~{ratio:.2f} batches/opt-step)")
+
 
 # --------- The pruner class ----------------------------------------------------------
 class LLMLayerPruner:
@@ -232,17 +308,64 @@ class LLMLayerPruner:
     # --- model loading / cloning ---
     def load_model(self):
         if self.model is not None:
-            return self.model
+            # return a count, to keep the return type consistent
+            layers, _ = _arch_probe(self.model)
+            return len(layers)
         if not self.model_name:
             raise ValueError("Provide model_name or a loaded model.")
-        kwargs = {"trust_remote_code": self.trust_remote_code} #, "device_map": "auto" if self.device.startswith("cuda") else None}
-        if self.quant_config is not None:
+
+        compose_json = os.path.join(self.model_name, "PEFT_COMPOSE.json")
+        if os.path.isdir(self.model_name) and os.path.exists(compose_json):
+            try:
+                import json
+                from peft import PeftModel
+                with open(compose_json, "r") as f:
+                    comp = json.load(f)
+                base_dir = os.path.join(self.model_name, comp.get("base", "base"))
+                adapters_dir = os.path.join(self.model_name, comp.get("adapters", "adapters"))
+
+                # Tokenizer (align with analyzer lazy-load behavior)
+                if self._tokenizer is None:
+                    self._tokenizer = AutoTokenizer.from_pretrained(base_dir, trust_remote_code=self.trust_remote_code)
+                    if self._tokenizer.pad_token is None:
+                        self._tokenizer.pad_token = getattr(self._tokenizer, "eos_token",
+                                                            None) or self._tokenizer.unk_token
+                    self._tokenizer.padding_side = "left"
+
+                model_kwargs = {
+                    "trust_remote_code": self.trust_remote_code,
+                    # keep or drop device_map depending on your preference
+                    # "device_map": "auto" if self.device.startswith("cuda") else None,
+                }
+                if self.bnb_config is not None:
+                    model_kwargs["quantization_config"] = self.bnb_config
+                else:
+                    model_kwargs["torch_dtype"] = self.torch_dtype
+
+                base = AutoModelForCausalLM.from_pretrained(base_dir, **model_kwargs).to(self.device)
+                self.model = PeftModel.from_pretrained(base, adapters_dir)
+                self.model.eval()
+
+                layers, _ = _arch_probe(self.model)
+                print(f"Composed PEFT model loaded with {len(layers)} transformer blocks.")
+                return len(layers)
+            except Exception as e:
+                print(f"[Analyzer] PEFT compose load failed ({e}); falling back to plain load.")
+
+        # Plain load path (match return type to int)
+        kwargs = {"trust_remote_code": self.trust_remote_code}
+        # Optional: follow your analyzer’s default behavior
+        # kwargs["device_map"] = "auto" if self.device.startswith("cuda") else None
+        if self.quant_config is not None:  # or self.bnb_config depending on your class attribute
             kwargs["quantization_config"] = self.quant_config
         else:
             kwargs["torch_dtype"] = self.torch_dtype
+
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **kwargs).to(self.device)
         self.model.eval()
-        return self.model
+
+        layers, _ = _arch_probe(self.model)
+        return len(layers)
 
     def configure_profiles(self, *, ppl=None, single_heal=None, qlora=None,
                            max_eval_seq_len=None, gen_max_new_tokens=None):
@@ -310,12 +433,10 @@ class LLMLayerPruner:
 
         try:
             m = AutoModelForCausalLM.from_pretrained(self.model_name, **kwargs).to(self.device)
-        except Exception:
-            #TODO: Throw some error here
-            pass
-
-        m.eval()
-        return m
+            m.eval()
+            return m
+        except Exception as e:
+            raise RuntimeError(f"Failed to (re)load model for phase='{phase}': {e}") from e
 
     # --- basic evals ---
     def sanity_check(self, dataloader, max_batches: int = 1, model: Optional[nn.Module] = None) -> Dict:
@@ -429,6 +550,8 @@ class LLMLayerPruner:
     def _get_layer_container_and_list(self, model):
         if hasattr(model, "model") and hasattr(model.model, "layers"):
             return model.model, model.model.layers
+        if hasattr(model, "layers"):
+            return model, model.layers
         if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
             return model.transformer, model.transformer.h
         if hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers"):
@@ -1488,6 +1611,590 @@ class LLMLayerPruner:
 
         return pd.DataFrame(variants_all)
 
+    def run_single_flow_pruning(
+        self,
+        *,
+        train_dataloader,
+        eval_dataloader=None,
+        percent: int,
+        replacement: Optional[str] = None,           # None or one of: "tblock_blank","tblock_avg","tblock_lr_mean","tblock_consensus"
+        heal_methods: Union[str, List[str]] = ("qlora",),  # allowed: "single_layer", "qlora" (order matters)
+        # How to pick the span:
+        agg_method: str = "weighted_mean",           # "weighted_mean" or "minimax"
+        agg_method_csvs: Optional[Dict[str, str]] = None,  # if not provided, we'll call Analyzer
+        analyzer: Optional["LayerPruningAnalyzer"] = None, # optional: pass a preconfigured analyzer
+        task_token_targets: Optional[Dict[str, Dict[str, int]]] = None,  # if we must build CSVs
+        analyzer_outdir: Optional[str] = None,
+        analyzer_weights: Optional[Dict[str, float]] = None,
+        analyzer_max_block_size: int = 15,
+        token_max_length: int = 512,                 # used only if we must aggregate
+        # Single-layer heal params
+        single_lr: float = 2e-4,
+        single_max_steps: int = 350,
+        single_grad_accum: int = 1,
+        # QLoRA params
+        qlora_lr: float = 1e-4,
+        qlora_max_steps: int = 700,
+        qlora_grad_accum: int = 1,
+        qlora_r: int = 16,
+        qlora_alpha: int = 32,
+        qlora_dropout: float = 0.05,
+        qlora_target_modules: Optional[List[str]] = None,
+        # Results/control
+        experiment_dir: Optional[str] = None,
+        save_variant: bool = True,
+        on_cpu_for_prune: bool = False,              # if True, prune on CPU (shadow) to save VRAM
+    ) -> Dict:
+        """
+        End-to-end: baseline -> analyze/aggregate (if needed) -> prune -> heal(s) -> eval -> save.
+        Returns a dictionary with span selection, ppl baselines, post-prune, post-heal metrics and save paths.
+        """
+        # -------- sanity & setup --------
+        if isinstance(heal_methods, str):
+            heal_methods = [heal_methods]
+        heal_methods = [h.lower() for h in heal_methods]
+        assert all(h in ("single_layer", "qlora") for h in heal_methods), f"heal_methods must be from ['single_layer','qlora']"
+
+        eval_loader = self._pick_eval_loader(train_dataloader, eval_dataloader)
+        baseline_model = self._fresh_model_for_phase("ppl")
+        baseline_ppl = self.compute_perplexity(eval_loader, model=baseline_model)
+        del baseline_model; gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+
+        # Layer count for percent->block_size
+        tmp_model = self._fresh_model_for_pruning(quantized=False, on_cpu=True)
+        layers, _ = _arch_probe(tmp_model)
+        L0 = len(layers)
+        del tmp_model; gc.collect()
+
+        remove_L = int(round(L0 * percent / 100.0))
+
+        # -------- ensure aggregate CSVs (if needed) --------
+        if agg_method_csvs is None:
+            if analyzer is None:
+                from LayerPruningAnalyzer import LayerPruningAnalyzer  # local import to avoid circulars
+                analyzer = LayerPruningAnalyzer(
+                    model_name=self.model_name,
+                    results_dir=analyzer_outdir or os.path.join(self.results_dir, "analysis"),
+                    device=self.device,
+                    dtype=("bf16" if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else ("fp16" if torch.cuda.is_available() else "fp32")),
+                    trust_remote_code=self.trust_remote_code,
+                    batch_size=getattr(self, "analysis_batch_size", 4),
+                    max_samples=getattr(self, "analysis_max_samples", 2000),
+                )
+                analyzer.tokenizer  # lazy init
+
+            if task_token_targets is None:
+                raise ValueError("run_single_flow_pruning: need 'agg_method_csvs' or 'task_token_targets' to build aggregates.")
+
+            agg_method_csvs = analyzer.ensure_aggregate_csvs_for_tasks(
+                task_token_targets=task_token_targets,
+                outdir=analyzer_outdir or os.path.join(self.results_dir, "analysis"),
+                max_block_size=analyzer_max_block_size,
+                weights=analyzer_weights,
+                token_max_length=token_max_length,
+                batch_size=getattr(self, "analysis_batch_size", 4),
+            )
+
+        # pick selection row(s)
+        csv_path = agg_method_csvs["weighted_mean"] if agg_method == "weighted_mean" else agg_method_csvs["minimax"]
+        sel_none = self._read_aggregate_row(csv_path, block_size=remove_L)              # for 'none'
+        sel_repl = self._read_aggregate_row(csv_path, block_size=remove_L + 1)         # for insertion strategies
+        if replacement in (None, "none") and not sel_none:
+            raise RuntimeError(f"No selection found for block_size={remove_L} in {csv_path}")
+        if replacement not in (None, "none") and not sel_repl:
+            raise RuntimeError(f"No selection found for block_size={remove_L+1} in {csv_path}")
+
+        # -------- prune (optionally insert replacement) --------
+        # Use non-quantized or phase-specific profile for reliable weight surgery
+        m = self._fresh_model_for_pruning(quantized=False, on_cpu=on_cpu_for_prune)
+        if replacement in (None, "none"):
+            s, e = sel_none["start"], sel_none["end_incl"]
+            self.prune_without_replacement(m, s, e)                                      # pruning path unchanged :contentReference[oaicite:5]{index=5}
+            inserted_idx = None
+        else:
+            s, e = sel_repl["start"], sel_repl["end_incl"]
+            new_layer, _ = self._build_replacement_layer(m, s, e, strategy=replacement)  # you already support these strategies
+            self.prune_without_replacement(m, s, e)
+            self._insert_replacement(m, s, new_layer)
+
+            inserted_idx = s
+
+        ppl_post_prune = self.compute_perplexity(eval_loader, model=m)
+
+        # Prepare experiment directory
+        slug = self._slugify(self.model_name)
+        flow_tag = f"p{percent}_{('none' if replacement in (None,'none') else replacement)}_{'-'.join(heal_methods) or 'noheal'}"
+        exp_dir = experiment_dir or os.path.join(self.results_dir, "single_flow", slug, flow_tag)
+        os.makedirs(exp_dir, exist_ok=True)
+
+        meta = {
+            "model_name": self.model_name,
+            "percent": percent,
+            "block_size": remove_L,
+            "selected_start": s,
+            "selected_end_inclusive": e,
+            "replacement": (replacement or "none"),
+            "heal_methods": heal_methods,
+            "agg_method": agg_method,
+            "agg_csv": csv_path,
+            "baseline_ppl": float(baseline_ppl),
+            "post_prune_ppl": float(ppl_post_prune),
+        }
+
+        # Persist pre-heal variant if requested
+        if save_variant:
+            try:
+                if self._model_uses_bnb(m):
+                    self._save_inserted_layer_recipe(m, inserted_idx, os.path.join(exp_dir, "preheal_recipe"), meta.copy())
+                else:
+                    try:
+                        m.to(self.torch_dtype)
+                    except Exception:
+                        pass
+                    m.save_pretrained(os.path.join(exp_dir, "preheal_model"))
+                    with open(os.path.join(exp_dir, "preheal_model", "meta.json"), "w") as f:
+                        json.dump(meta, f, indent=2)
+            except Exception as ex:
+                print(f"[WARN] preheal save failed: {ex}")
+
+        # -------- run healing steps (ordered) --------
+        ppl_after_single = None
+        ppl_after_qlora  = None
+        adapters_path = None
+
+        for step in heal_methods:
+            if step == "single_layer":
+                if inserted_idx is None:
+                    raise RuntimeError("single_layer heal requires a replacement block to be inserted.")
+                ppl_after_single = self.heal_inserted_layer_trainer(
+                    m, inserted_idx=inserted_idx,
+                    train_dataloader=train_dataloader,
+                    eval_dataloader=eval_loader,
+                    max_steps=single_max_steps, lr=single_lr, grad_accum=single_grad_accum,
+                    log_dir=os.path.join(exp_dir, "single_layer_logs"),
+                )
+                meta["post_single_layer_ppl"] = float(ppl_after_single)
+
+            elif step == "qlora":
+                q = self.full_heal_qLoRA_trainer(
+                    m,
+                    train_dataloader=train_dataloader,
+                    eval_dataloader=eval_loader,
+                    max_steps=qlora_max_steps, lr=qlora_lr,
+                    r=qlora_r, alpha=qlora_alpha, dropout=qlora_dropout,
+                    target_modules=qlora_target_modules,
+                    grad_accum=qlora_grad_accum,
+                    save_dir=os.path.join(exp_dir, "qlora_adapters"),
+                )
+                adapters_path = q.get("adapter_path", adapters_path)
+                ppl_after_qlora = q.get("ppl", None) or self.compute_perplexity(eval_loader, model=m)
+                meta["post_qlora_ppl"] = float(ppl_after_qlora)
+            else:
+                raise ValueError(f"Unknown heal step: {step}")
+
+        # Finalize meta and write run.json
+        with open(os.path.join(exp_dir, "run.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+
+        out = {
+            "ok": True,
+            "experiment_dir": exp_dir,
+            "selection": {"start": s, "end_incl": e, "block_size": remove_L},
+            "baseline_ppl": baseline_ppl,
+            "post_prune_ppl": ppl_post_prune,
+            "post_single_layer_ppl": ppl_after_single,
+            "post_qlora_ppl": ppl_after_qlora,
+            "adapters_path": adapters_path,
+            "replacement": (replacement or "none"),
+            "heal_methods": heal_methods,
+        }
+
+        # best-effort cleanup
+        del m
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+        gc.collect()
+
+        return out
+
+    # --- Progressive pruning ---
+    def _save_model_for_analysis(self, model, out_dir: str):
+        """
+        Save `model` in a HF-loadable dir for analysis.
+        Uses the same merge/compose logic as rollback.
+        """
+        self._save_checkpoint_for_rollback(model, out_dir)
+        # breadcrumb for humans
+        with open(os.path.join(out_dir, "ANALYZE_README.txt"), "w") as f:
+            f.write("Checkpoint for per-step analysis (merged if possible).\n")
+
+    def _save_checkpoint_for_rollback(self, model, out_dir: str):
+        """
+        Save a rollback checkpoint that the Analyzer and HF can reload as a plain model.
+        Tries to merge PEFT adapters before saving; falls back to a base+adapters composition.
+        Always saves the tokenizer too.
+        """
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _save_plain(m, tgt):
+            try:
+                m.to(self.torch_dtype)
+            except Exception:
+                pass
+            m.save_pretrained(tgt)
+            self.tokenizer.save_pretrained(tgt)
+
+        # Try fast GPU merge when base isn't 4-bit
+        try:
+            from peft import PeftModel
+            is_peft = isinstance(model, PeftModel) or hasattr(model, "merge_and_unload")
+        except Exception:
+            is_peft = hasattr(model, "merge_and_unload")
+
+        if is_peft:
+            try:
+                is_4bit = getattr(getattr(model, "base_model", model), "is_loaded_in_4bit", False)
+                if hasattr(model, "merge_and_unload") and not is_4bit:
+                    merged = model.merge_and_unload()
+                    merged.to(self.device).eval()
+                    _save_plain(merged, out_dir)
+                    return
+            except Exception:
+                pass
+
+            # CPU merge fallback (keeps VRAM low)
+            try:
+                cpu_model = model.to("cpu")
+                if hasattr(cpu_model, "merge_and_unload"):
+                    merged_cpu = cpu_model.merge_and_unload()
+                    _save_plain(merged_cpu, out_dir)
+                    return
+            except Exception:
+                pass
+
+            # Final fallback: compose base + adapters (Analyzer will handle this)
+            base_dir = os.path.join(out_dir, "base")
+            adapters_dir = os.path.join(out_dir, "adapters")
+            try:
+                # Save base
+                base = getattr(model, "base_model", None) or getattr(model, "model", None)
+                if base is None:
+                    base = model
+                _save_plain(base, base_dir)
+                # Save adapters
+                model.save_pretrained(adapters_dir)
+                with open(os.path.join(out_dir, "PEFT_COMPOSE.json"), "w") as f:
+                    json.dump({"base": "base", "adapters": "adapters"}, f)
+                return
+            except Exception:
+                # If even that fails, last-ditch: save whatever we have
+                _save_plain(model, out_dir)
+                return
+        else:
+            _save_plain(model, out_dir)
+
+    def run_progressive_pruning(
+            self,
+            *,
+            train_dataloader,
+            eval_dataloader=None,
+            start_percent: int = 35,
+            replacement: str = "tblock_avg",  # or "none"
+            heal_methods: List[str] = ("single_layer",),
+            # PPL ceiling — use *one* of these (ratio takes precedence if both are given)
+            ppl_ratio_limit: Optional[float] = 1.15,  # e.g., allow +15% vs. baseline
+            ppl_delta_limit: Optional[float] = None,  # e.g., allow +2.0 absolute
+            # selection / analyzer
+            agg_method: str = "weighted_mean",
+            agg_method_csvs: Optional[Dict[str, str]] = None,
+            analyzer: Optional["LayerPruningAnalyzer"] = None,
+            task_token_targets: Optional[Dict[str, int]] = None,  # only used if we need to build CSVs
+            analyzer_outdir: Optional[str] = None,
+            analyzer_weights: Optional[Dict[str, float]] = None,
+            analyzer_max_block_size: int = 15,
+            token_max_length: int = 512,
+            # heal hyperparams (forwarded to single-flow)
+            single_lr: float = 2e-4,
+            single_max_steps: int = 350,
+            single_grad_accum: int = 2,
+            qlora_lr: float = 1e-4,
+            qlora_max_steps: int = 700,
+            qlora_grad_accum: int = 2,
+            qlora_r: int = 16,
+            qlora_alpha: int = 32,
+            qlora_dropout: float = 0.05,
+            qlora_target_modules: Optional[List[str]] = None,
+            # stopping rules & bookkeeping
+            min_block: int = 2,  # stop when next block size < min_block
+            experiment_dir: Optional[str] = None,
+            save_variant_each_step: bool = True,
+    ) -> Dict:
+        """
+        Progressive pruning with a PPL ceiling. At each step, prune+heal by current percent.
+        If post-heal PPL > limit, halve percent and retry from the last accepted model.
+        Stop when the block to prune falls below `min_block`.
+
+        Returns a dict with baseline, limit, per-step records, and the final model artifact dir.
+        """
+        import json, os, math, gc
+        import pandas as pd
+        from copy import deepcopy
+
+        # ---------- Setup / eval loader ----------
+        eval_loader = self._pick_eval_loader(train_dataloader, eval_dataloader)
+
+        # Baseline PPL on a fresh model (phase "ppl" quant profile if set)
+        base_model = self._fresh_model_for_phase("ppl")
+        baseline_ppl = self.compute_perplexity(eval_loader, model=base_model)
+        del base_model;
+        gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        # PPL limit
+        if ppl_ratio_limit is not None:
+            ppl_limit = baseline_ppl * float(ppl_ratio_limit)
+        elif ppl_delta_limit is not None:
+            ppl_limit = baseline_ppl + float(ppl_delta_limit)
+        else:
+            raise ValueError("Provide ppl_ratio_limit or ppl_delta_limit.")
+
+        # Initial working model for surgery (unquantized by default for reliability)
+        working = self._fresh_model_for_pruning(quantized=False, on_cpu=False)
+        layers, _ = _arch_probe(working)
+        L0 = len(layers)
+
+        # ---------- Aggregate CSVs (selection pool) ----------
+        if agg_method_csvs is None:
+            # Build once (original model analysis). Let analyzer fill default equal weights when None.
+            if analyzer is None:
+                from LayerPruningAnalyzer import LayerPruningAnalyzer
+                analyzer = LayerPruningAnalyzer(
+                    model_name=self.model_name,
+                    results_dir=analyzer_outdir or os.path.join(self.results_dir, "analysis"),
+                    device=self.device,
+                    dtype=("bf16" if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else (
+                        "fp16" if torch.cuda.is_available() else "fp32")),
+                    trust_remote_code=self.trust_remote_code,
+                    batch_size=getattr(self, "analysis_batch_size", 4),
+                    max_samples=getattr(self, "analysis_max_samples", 2000),
+                )
+                analyzer.tokenizer  # lazy init
+            if task_token_targets is None:
+                task_token_targets = {"syntax": 50_000, "code": 50_000, "math": 50_000}
+
+            # IMPORTANT: pass None to let analyzer auto-equalize weights internally.
+            csvs = analyzer.ensure_aggregate_csvs_for_tasks(
+                task_token_targets=task_token_targets,
+                outdir=analyzer_outdir or os.path.join(self.results_dir, "analysis"),
+                max_block_size=analyzer_max_block_size,
+                weights=analyzer_weights,  # keep None as None
+                token_max_length=token_max_length,
+                batch_size=getattr(self, "analysis_batch_size", 4),
+            )
+            agg_method_csvs = csvs
+
+        csv_path = agg_method_csvs["weighted_mean"] if agg_method == "weighted_mean" else agg_method_csvs["minimax"]
+        df = pd.read_csv(csv_path)
+        # sort by distance ascending (best first)
+        if "distance" in df.columns:
+            df = df.sort_values("distance", ascending=True)
+        # group candidates by block_size for quick access
+        candidates_by_bs = {k: v.reset_index(drop=True)
+                            for k, v in df.groupby("block_size")}  # expects columns: start, end_incl, block_size
+
+        # ---------- experiment dir ----------
+        slug = self._slugify(self.model_name)
+        prog_dir = experiment_dir or os.path.join(self.results_dir, "progressive", slug)
+        os.makedirs(prog_dir, exist_ok=True)
+
+        # ---------- loop state ----------
+        records = []
+        step = 0
+        percent = int(start_percent)
+
+        # Keep a "last accepted" model to roll back to if we exceed the limit
+        last_ok_dir = os.path.join(prog_dir, "_last_ok_ckpt")
+        self._save_checkpoint_for_rollback(working, last_ok_dir)
+        last_ok_ppl = baseline_ppl
+
+        while True:
+            L_now = len(_arch_probe(working)[0])
+            # decide block size as a percent of current length
+            block_size = int(round(L_now * percent / 100.0))
+            if block_size < min_block:
+                print(f"[progressive] stopping: next block_size={block_size} < min_block={min_block}")
+                break
+
+            # ---- make new directory for anlysis of this step ----
+            step_dir = os.path.join(prog_dir, f"step_{step:03d}_p{percent}_bs{block_size}")
+            os.makedirs(step_dir, exist_ok=True)
+
+            # 1) Save the current working model to a temp dir for analysis
+            cur_ckpt_dir = os.path.join(step_dir, "analysis_model")
+            self._save_model_for_analysis(working, cur_ckpt_dir)
+
+            # 2) Run a fresh analysis on THIS checkpoint to get aggregate CSVs
+            from LayerPruningAnalyzer import LayerPruningAnalyzer
+            an = LayerPruningAnalyzer(
+                model_name=cur_ckpt_dir,  # <-- local path works with HF
+                results_dir=os.path.join(step_dir, "analysis"),  # step-local analysis dir
+                device=self.device,
+                dtype=("bf16" if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+                       else ("fp16" if torch.cuda.is_available() else "fp32")),
+                batch_size=getattr(self, "analysis_batch_size", 4),
+                max_samples=getattr(self, "analysis_max_samples", 2000),
+                trust_remote_code=self.trust_remote_code,
+            )
+            an.tokenizer = self.tokenizer  # bypasses AutoTokenizer.from_pretrained(cur_ckpt_dir)
+            # Let analyzer default to equal weights if you don't pass any:
+            csvs = an.ensure_aggregate_csvs_for_tasks(
+                task_token_targets=task_token_targets or {"syntax": 50_000, "code": 50_000, "math": 50_000},
+                outdir=os.path.join(step_dir, "analysis"),  # normalized by analyzer ctor
+                max_block_size=analyzer_max_block_size,
+                weights=analyzer_weights,  # keep None as None
+                token_max_length=token_max_length,
+                batch_size=getattr(self, "analysis_batch_size", 4),
+            )
+
+            csv_path = csvs["weighted_mean"] if agg_method == "weighted_mean" else csvs["minimax"]
+
+            # 3) Read best candidate for THIS model and THIS block_size (no mapping needed now)
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            if "distance" in df.columns:
+                df = df.sort_values("distance", ascending=True)
+            cand_df = df[df["block_size"] == int(block_size)]
+            if cand_df.empty:
+                print(f"[progressive] no candidates in CSV for block_size={block_size}; reducing percent.")
+                percent = max(1, percent // 2)
+                continue
+
+            sel_row = cand_df.iloc[0].to_dict()
+            # indices are already for the *current* model
+            s_cur, e_cur = int(sel_row["chosen_start_layer"]), int(sel_row["chosen_end_layer_inclusive"])
+
+            # --- perform prune+insert (if replacement) on the *working* model ---
+            if replacement in (None, "none"):
+                self.prune_without_replacement(working, s_cur, e_cur)
+                inserted_idx = None
+            else:
+                new_layer, _ = self._build_replacement_layer(working, s_cur, e_cur, strategy=replacement)
+                self.prune_without_replacement(working, s_cur, e_cur)
+                self._insert_replacement(working, s_cur, new_layer)
+                inserted_idx = s_cur
+
+            ppl_post_prune = self.compute_perplexity(eval_loader, model=working)
+
+            # heal in the specified order (same trainer-based paths you already use)
+            ppl_after_single = None
+            ppl_after_qlora = None
+            adapters_path = None
+
+            step_dir = os.path.join(prog_dir, f"step_{step:03d}_p{percent}_bs{block_size}")
+            os.makedirs(step_dir, exist_ok=True)
+
+            for hm in heal_methods:
+                if hm == "single_layer":
+                    if inserted_idx is None:
+                        # If user requests single_layer heal but used "none" replacement, bail
+                        raise RuntimeError("single_layer heal requires a replacement block.")
+                    ppl_after_single = self.heal_inserted_layer_trainer(
+                        working, inserted_idx=inserted_idx,
+                        train_dataloader=train_dataloader, eval_dataloader=eval_loader,
+                        max_steps=single_max_steps, lr=single_lr, grad_accum=single_grad_accum,
+                        log_dir=os.path.join(step_dir, "single_layer_logs"),
+                    )
+                elif hm == "qlora":
+                    q = self.full_heal_qLoRA_trainer(
+                        working, train_dataloader=train_dataloader, eval_dataloader=eval_loader,
+                        max_steps=qlora_max_steps, lr=qlora_lr, grad_accum=qlora_grad_accum,
+                        r=qlora_r, alpha=qlora_alpha, dropout=qlora_dropout,
+                        target_modules=qlora_target_modules, save_dir=os.path.join(step_dir, "qlora_adapters"),
+                    )
+                    adapters_path = q.get("adapter_path", adapters_path)
+                    ppl_after_qlora = q.get("ppl", None) or self.compute_perplexity(eval_loader, model=working)
+                else:
+                    raise ValueError(f"Unknown heal method: {hm}")
+
+            # decide final ppl for acceptance
+            final_ppl = ppl_after_qlora if ppl_after_qlora is not None else (
+                ppl_after_single if ppl_after_single is not None else ppl_post_prune
+            )
+
+            # save meta & (optional) recipe/model snapshot
+            meta = {
+                "step": step,
+                "percent": percent,
+                "block_size": block_size,
+                "selected_original": {"start": int(sel_row["chosen_start_layer"]), "end_incl": int(sel_row["chosen_end_layer_inclusive"])},
+                "mapped_current": {"start": int(s_cur), "end_incl": int(e_cur)},
+                "replacement": replacement or "none",
+                "heal_methods": list(heal_methods),
+                "baseline_ppl": float(baseline_ppl),
+                "ppl_limit": float(ppl_limit),
+                "post_prune_ppl": float(ppl_post_prune),
+                "post_single_layer_ppl": float(ppl_after_single) if ppl_after_single is not None else None,
+                "post_qlora_ppl": float(ppl_after_qlora) if ppl_after_qlora is not None else None,
+                "final_ppl": float(final_ppl),
+                "csv_path": csv_path,
+            }
+            with open(os.path.join(step_dir, "run.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+
+            if save_variant_each_step:
+                try:
+                    if self._model_uses_bnb(working):
+                        self._save_inserted_layer_recipe(working, inserted_idx,
+                                                         os.path.join(step_dir, "preheal_recipe"), meta.copy())
+                    else:
+                        try:
+                            working.to(self.torch_dtype)
+                        except Exception:
+                            pass
+                        working.save_pretrained(os.path.join(step_dir, "model"))
+                        with open(os.path.join(step_dir, "model", "meta.json"), "w") as f:
+                            json.dump(meta, f, indent=2)
+                except Exception as ex:
+                    print(f"[WARN] save failed at step {step}: {ex}")
+
+            # accept or rollback
+            if final_ppl <= ppl_limit:
+                # accept: commit removal in *original* indexing)
+                self._save_checkpoint_for_rollback(working, last_ok_dir)
+                last_ok_ppl = final_ppl
+                records.append({"status": "accepted", **meta, "dir": step_dir})
+                step += 1
+                # keep same percent for next step
+            else:
+                # rollback and halve percent
+                print(f"[progressive] PPL {final_ppl:.4f} exceeded limit {ppl_limit:.4f} — halving percent and retrying.")
+                del working
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+                working = AutoModelForCausalLM.from_pretrained(last_ok_dir, trust_remote_code=self.trust_remote_code).to(self.device).eval()
+                # If halving brings block size below min_block, stop.
+                percent = max(1, percent // 2)
+                # If next block at new percent < min_block, stop in the next loop head.
+                records.append({"status": "rejected", **meta, "dir": step_dir})
+
+            # loop continues; head will test min_block again
+
+        # write a final manifest
+        manifest = {
+            "ok": True,
+            "baseline_ppl": float(baseline_ppl),
+            "ppl_limit": float(ppl_limit),
+            "final_ppl": float(last_ok_ppl),
+            "steps": records,
+            "experiment_dir": prog_dir,
+        }
+        with open(os.path.join(prog_dir, "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
+
+        # return summary
+        return manifest
+
     # --- Using Trainer ---
     def _freeze_all_but(self, model, module):
         for p in model.parameters():
@@ -1512,6 +2219,49 @@ class LLMLayerPruner:
 
         return collate
 
+    def make_trainer(
+            self,
+            model,
+            train_dataset,
+            eval_dataset,
+            data_collator,
+            *,
+            output_dir: str,
+            learning_rate: float,
+            max_steps: int,
+            gradient_accumulation_steps: int,
+            per_device_train_batch_size: int,
+            per_device_eval_batch_size: int,
+            logging_steps: int = 10,
+            save_steps: int = 0,
+            eval_steps: int = 0,
+            fp16: bool = False,
+            bf16: bool = True,
+    ):
+        args = TrainingArguments(
+            output_dir=output_dir,
+            max_steps=max_steps,  # number of *optimizer* steps
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            per_device_train_batch_size=per_device_train_batch_size,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            learning_rate=learning_rate,
+            remove_unused_columns=False,  # don't drop our fields
+            label_names=["labels"],
+            logging_steps=logging_steps,
+            save_steps=save_steps,
+            eval_steps=eval_steps,
+            fp16=fp16,
+            bf16=bf16,
+            report_to=[],
+        )
+        return Trainer(
+            model=model,
+            args=args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            data_collator=data_collator,
+        )
+
     def heal_inserted_layer_trainer(
             self,
             model,
@@ -1523,9 +2273,15 @@ class LLMLayerPruner:
             grad_accum: int = 1,
             log_dir: Optional[str] = None,
     ) -> float:
+        """
+        Trainer-based single-layer heal, now using Builder-native dataset+collator:
+          - derive truthful per-device batch sizes from incoming loaders
+          - tokenize/pad/label exactly once in collator (no unbatch/rebatch)
+          - add step accounting to verify max_steps × grad_accum behavior
+        """
         from transformers import Trainer, TrainingArguments
 
-        # Freeze everything but the inserted layer (same as manual)
+        # 1) Freeze everything except the inserted layer (unchanged)
         parent, layers = self._get_layer_container_and_list(model)
         train_layer = layers[inserted_idx]
         comp_dtype = self._infer_compute_dtype(model)
@@ -1538,23 +2294,38 @@ class LLMLayerPruner:
             model.config.use_cache = False
         model.train()
 
-        # Let Trainer see per-*example* items, not pre-batched dicts
-        train_ds = _UnbatchedIterable(train_dataloader)
-        eval_ds = _UnbatchedIterable(eval_dataloader) if eval_dataloader is not None else None
+        # 2) Build Trainer-native dataset+collator from the *texts* behind your loaders
+        train_texts = _extract_texts_from_loader(train_dataloader)
+        eval_texts = _extract_texts_from_loader(eval_dataloader) if eval_dataloader is not None else None
+        train_ds = TextListMapDataset(train_texts)
+        eval_ds = TextListMapDataset(eval_texts) if eval_texts is not None else None
 
-        # Use the smallest per-device batch here; your outer dataloader already handled memory
+        # Respect the batch sizes you used when you built the loaders (truthful values)
+        per_dev_train_bs = int(getattr(train_dataloader, "batch_size", 1) or 1)
+        per_dev_eval_bs = int(
+            getattr(eval_dataloader, "batch_size", 1) or 1) if eval_dataloader is not None else per_dev_train_bs
+
+        # Single source of truth for padding and labels (pad-to-longest, labels=-100 on pad)
+        max_len = int(self.max_eval_seq_len or 512)
+        # collator = collate_with_labels(self.tokenizer, max_len)
+        base_collator = collate_with_labels(self.tokenizer, max_len)
+        acct = {"micro_batches": 0, "tokens": 0}
+        collator = _CountingCollator(base_collator, acct)
+
+        # 3) Trainer args (no fake batch size)
+        out_dir = log_dir or os.path.join(self.results_dir, "trainer_heal_tmp")
         args = TrainingArguments(
-            output_dir=log_dir or os.path.join(self.results_dir, "trainer_heal_tmp"),
-            per_device_train_batch_size=1,
-            per_device_eval_batch_size=1,
+            output_dir=out_dir,
+            per_device_train_batch_size=per_dev_train_bs,
+            per_device_eval_batch_size=per_dev_eval_bs,
             gradient_accumulation_steps=grad_accum,
             learning_rate=lr,
             num_train_epochs=1,  # we drive with max_steps
-            max_steps=max_steps,
+            max_steps=max_steps,  # counts *optimizer* steps
             logging_steps=max(1, max_steps // 20),
-            eval_strategy="no",  # do eval after training via your compute_perplexity
+            eval_strategy="no",
             save_strategy="no",
-            remove_unused_columns=False,  # IMPORTANT for passing our dict as-is
+            remove_unused_columns=False,
             report_to=[],
             fp16=(comp_dtype == torch.float16),
             bf16=(comp_dtype == torch.bfloat16),
@@ -1562,21 +2333,32 @@ class LLMLayerPruner:
             label_names=["labels"],
         )
 
-        # Build an optimizer for just the train_layer parameters (keeps rest frozen)
+        # 4) Optimizer over the single trainable layer
         opt = torch.optim.AdamW([p for p in train_layer.parameters() if p.requires_grad], lr=lr)
+        # 5) Batch accounting
+        acct_callback = StepAccountingCallback(grad_accum=grad_accum)
 
+        # 5) Trainer with step accounting
         trainer = Trainer(
             model=model,
             args=args,
             train_dataset=train_ds,
             eval_dataset=eval_ds,
-            data_collator=make_leftpad_collator(self.tokenizer.pad_token_id),
+            data_collator=collator,
             optimizers=(opt, None),
+            callbacks=[acct_callback],
         )
 
         trainer.train()
 
-        # Evaluate perplexity using your existing path (consistent with pre/post evals)
+        # reliable accounting
+        opt_steps = int(getattr(trainer.state, "global_step", 0))  # optimizer steps
+        mb = int(acct["micro_batches"])
+        ga = int(args.gradient_accumulation_steps)
+        ratio = (mb / opt_steps) if opt_steps else 0.0
+        print(f"[Accounting] optimizer_steps={opt_steps}  micro_batches={mb}  grad_accum={ga}  (~{ratio:.2f} batches/opt-step)")
+
+        # 6) Evaluate perplexity via your existing path
         model.eval()
         if hasattr(model.config, "use_cache"):
             model.config.use_cache = True
@@ -1602,11 +2384,8 @@ class LLMLayerPruner:
             save_dir: Optional[str] = None,
     ) -> Dict:
         """
-        Trainer-based QLoRA:
-          - prepare k-bit model for training
-          - wrap with PEFT
-          - train via Trainer with our masking collator (per-example; left-pad; pad->-100)
-          - save adapters; PPL via compute_perplexity (merge fast-path when safe)
+        Trainer-based QLoRA using Builder-native dataset+collator (no unbatch/rebatch).
+        Saves adapters (if save_dir), computes PPL; fast merge-and-eval when safe.
         """
         out = {"ok": False, "error": None, "adapter_path": None, "ppl": None}
         try:
@@ -1623,12 +2402,12 @@ class LLMLayerPruner:
                 "w1", "w2", "w3", "dense_h_to_4h", "dense_4h_to_h"
             ]
 
-        # ---- training prep (important for k-bit) ----
+        # 1) Training prep for k-bit
         model.train()
         if hasattr(model.config, "use_cache"):
             model.config.use_cache = False
         try:
-            model = prepare_model_for_kbit_training(model)  # enables grad ckpt + input grads when available
+            model = prepare_model_for_kbit_training(model)
         except Exception:
             pass
         if hasattr(model, "gradient_checkpointing_enable"):
@@ -1642,39 +2421,53 @@ class LLMLayerPruner:
         )
         model = get_peft_model(model, lconf)
 
-        # Ensure LoRA trainables are in bf16/fp16 (never fp32) for stability + speed
         comp_dtype = (torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
                       else torch.float16)
-        for n, p in model.named_parameters():
+        for _, p in model.named_parameters():
             if p.requires_grad and p.is_floating_point() and p.dtype != comp_dtype:
                 p.data = p.data.to(comp_dtype)
 
-        # ---- Trainer plumbing: make the Trainer see *examples*, not pre-batched dicts ----
-        train_ds = _UnbatchedIterable(train_dataloader)
-        eval_ds = _UnbatchedIterable(eval_dataloader) if eval_dataloader is not None else None
-        collator = make_leftpad_collator(self.tokenizer.pad_token_id)
+        # 2) Builder-native dataset + truthful batch sizes
+        train_texts = _extract_texts_from_loader(train_dataloader)
+        eval_texts = _extract_texts_from_loader(eval_dataloader) if eval_dataloader is not None else None
+        train_ds = TextListMapDataset(train_texts)
+        eval_ds = TextListMapDataset(eval_texts) if eval_texts is not None else None
 
+        per_dev_train_bs = int(getattr(train_dataloader, "batch_size", 1) or 1)
+        per_dev_eval_bs = int(
+            getattr(eval_dataloader, "batch_size", 1) or 1) if eval_dataloader is not None else per_dev_train_bs
+
+        max_len = int(self.max_eval_seq_len or 512)
+        # collator = collate_with_labels(self.tokenizer, max_len)
+        base_collator = collate_with_labels(self.tokenizer, max_len)
+        acct = {"micro_batches": 0, "tokens": 0}
+        collator = _CountingCollator(base_collator, acct)
+
+        # 3) Trainer args (no hacks)
+        out_dir = save_dir or os.path.join(self.results_dir, "qlora_adapters")
         args = TrainingArguments(
-            output_dir=save_dir or os.path.join(self.results_dir, "qlora_adapters"),
-            per_device_train_batch_size=1,  # we already control memory via upstream loader
-            per_device_eval_batch_size=1,
+            output_dir=out_dir,
+            per_device_train_batch_size=per_dev_train_bs,
+            per_device_eval_batch_size=per_dev_eval_bs,
             gradient_accumulation_steps=grad_accum,
             learning_rate=lr,
-            max_steps=max_steps,
+            max_steps=max_steps,  # optimizer steps
             lr_scheduler_type="cosine",
             warmup_ratio=0.10,
             logging_steps=max(1, max_steps // 20),
-            save_strategy="no",  # save adapters manually post-train
-            remove_unused_columns=False,  # keep our dict keys intact
-            report_to=[],  # no W&B by default
+            save_strategy="no",  # adapters saved manually after train
+            remove_unused_columns=False,
+            report_to=[],
             fp16=(comp_dtype == torch.float16),
             bf16=(comp_dtype == torch.bfloat16),
             dataloader_pin_memory=True,
             eval_strategy="no",
-            label_names=["labels"],  # avoid PEFT label_names warning
+            label_names=["labels"],
         )
 
         opt = torch.optim.AdamW(model.parameters(), lr=lr)
+
+        acct_callback = StepAccountingCallback(grad_accum=grad_accum)
 
         trainer = Trainer(
             model=model,
@@ -1683,11 +2476,19 @@ class LLMLayerPruner:
             eval_dataset=eval_ds,
             data_collator=collator,
             optimizers=(opt, None),
+            callbacks=[acct_callback],
         )
 
         trainer.train()
 
-        # ---- save adapters BEFORE any merge attempt ----
+        # reliable accounting
+        opt_steps = int(getattr(trainer.state, "global_step", 0))  # optimizer steps
+        mb = int(acct["micro_batches"])
+        ga = int(args.gradient_accumulation_steps)
+        ratio = (mb / opt_steps) if opt_steps else 0.0
+        print(f"[Accounting] optimizer_steps={opt_steps}  micro_batches={mb}  grad_accum={ga}  (~{ratio:.2f} batches/opt-step)")
+
+        # 4) Save adapters before any merge
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
             try:
@@ -1697,7 +2498,7 @@ class LLMLayerPruner:
                 out["error"] = f"Failed to save adapters: {e}"
                 return out
 
-        # ---- fast eval: prefer merged weights when base isn't 4-bit ----
+        # 5) Evaluate (prefer merge-and-unload when base isn’t 4-bit)
         eval_loader = eval_dataloader or train_dataloader
         if eval_loader is not None:
             eval_model = model
@@ -1714,7 +2515,6 @@ class LLMLayerPruner:
                 pass
 
             if eval_model is model:
-                # fallback: PEFT-wrapped eval but make it lightweight
                 model.eval()
                 if hasattr(model, "gradient_checkpointing_disable"): model.gradient_checkpointing_disable()
                 for p in model.parameters(): p.requires_grad_(False)
@@ -1729,5 +2529,3 @@ class LLMLayerPruner:
 
         out["ok"] = True
         return out
-
-
