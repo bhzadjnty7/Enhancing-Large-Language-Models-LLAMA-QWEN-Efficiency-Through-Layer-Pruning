@@ -1,0 +1,16 @@
+{
+  "model_name": "Qwen/Qwen2.5-1.5B",
+  "percent": 50,
+  "block_size": 14,
+  "selected_start": 7,
+  "selected_end_inclusive": 21,
+  "replacement": "tblock_avg",
+  "heal_methods": [
+    "single_layer"
+  ],
+  "agg_method": "weighted_mean",
+  "agg_csv": "results/experiment0/analysis/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_aggregate_weighted_mean.csv",
+  "baseline_ppl": 12.408719142264108,
+  "post_prune_ppl": 161.5150019261339,
+  "post_single_layer_ppl": 20.352839705312753
+}

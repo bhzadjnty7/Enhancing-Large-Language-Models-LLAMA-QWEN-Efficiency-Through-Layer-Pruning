@@ -1,7 +1,0 @@
-variant,percent,method,ppl_pre_qlora,ppl_post_qlora,adapters,ok,error
-none,10,weighted_mean,11.563365317544983,8.81810857665199,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p10_none_qlora,True,
-tblock_blank_preheal,10,weighted_mean,12.191073082786136,8.903770450804197,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p10_tblock_blank_preheal_qlora,True,
-tblock_blank_post_single_layer_heal,10,weighted_mean,9.291985450771891,8.904599827696027,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p10_tblock_blank_healed_qlora,True,
-none,20,weighted_mean,13.7107564750729,9.302721709231777,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p20_none_qlora,True,
-tblock_blank_preheal,20,weighted_mean,16.041896876383817,9.721300897111968,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p20_tblock_blank_preheal_qlora,True,
-tblock_avg_post_single_layer_heal,20,weighted_mean,10.05724594628422,9.686848763084933,results/pruning/single-shot/qwen-qwen2.5-1.5b/qwen-qwen2.5-1.5b_weighted_mean_p20_tblock_avg_healed_qlora,True,

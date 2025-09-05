@@ -306,8 +306,8 @@ class MixtureDataBuilder:
             "used_splits": used_splits,
             "lengths": lengths_sorted,
         }
-        if self.verbose:
-            print(f"Prepared project mix: {summary}")
+        # if self.verbose:
+        #     print(f"Prepared project mix: {summary}")
         return texts_sorted, lengths_sorted, summary
 
     # --------------- multi-split mixtures (mutually exclusive) ---------------

@@ -1,0 +1,7 @@
+{
+  "origin": "rejected_rescued",
+  "adapters_path": "results/prog_experiment4/qwen-qwen2.5-1.5b/progressive/final_qlora_rejected_adapters",
+  "final_model_dir": "results/prog_experiment4/qwen-qwen2.5-1.5b/progressive/final_qlora_rejected_adapters_merged",
+  "ppl": 16.588213302392916,
+  "ok": true
+}

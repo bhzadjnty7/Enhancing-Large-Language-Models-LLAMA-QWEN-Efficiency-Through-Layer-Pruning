@@ -4,9 +4,9 @@
   "percent": 10,
   "selected_start": 12,
   "selected_end_inclusive": 15,
-  "ppl_before_heal": 12.123242812086296,
-  "ppl_after_heal": 9.363852161149497,
-  "delta_ppl": -2.7593906509367994,
+  "baseline_ppl": 12.408719142264108,
+  "post_ppl": 12.123242812086295,
+  "delta_ppl": -0.28547633017781315,
   "inserted_idx": 12,
   "rank": 16
 }
