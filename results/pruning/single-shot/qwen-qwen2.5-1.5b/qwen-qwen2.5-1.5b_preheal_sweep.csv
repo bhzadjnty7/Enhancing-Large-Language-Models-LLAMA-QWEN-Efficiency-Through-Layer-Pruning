@@ -1,3 +1,0 @@
-method,strategy,percent,selected_start,selected_end_inclusive,baseline_ppl,post_ppl,delta_ppl,inserted_idx,rank
-weighted_mean,none,10,13,15,12.17561275985492,11.489751077332084,-0.6858616825228356,,16
-weighted_mean,tblock_blank,10,12,15,12.17561275985492,12.254171656082786,0.07855889622786627,12.0,16

@@ -309,4 +309,17 @@ pyrightconfig.json
 # All safetensors models
 **/*.safetensors
 
-results/pruning/**/README.md
+# All zip files
+**/*.zip
+
+results/**/README.md
+results/**/ANALYZE_README.txt
+results/**/added_tokens.json
+results/**/chat_template.jinja
+results**/merges.txt
+results/**/tokenizer.json
+results/**/tokenizer_config.json
+results/**/vocab.json
+results/**/special_tokens_map.json
+results/**/meta.json
+

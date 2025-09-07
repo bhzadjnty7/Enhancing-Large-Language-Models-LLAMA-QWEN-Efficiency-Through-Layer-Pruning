@@ -1,0 +1,139 @@
+{
+  "ok": true,
+  "baseline_ppl": 12.408719142264108,
+  "ppl_limit": 18.613078713396163,
+  "final_ppl": 16.508009719978602,
+  "steps": [
+    {
+      "status": "accepted",
+      "step": 0,
+      "percent": 25,
+      "block_size": 7,
+      "selected_original": {
+        "start": 9,
+        "end_incl": 15
+      },
+      "mapped_current": {
+        "start": 9,
+        "end_incl": 15
+      },
+      "replacement": "none",
+      "heal_methods": [
+        "qlora"
+      ],
+      "baseline_ppl": 12.408719142264108,
+      "ppl_limit": 18.613078713396163,
+      "post_prune_ppl": 16.03689329977371,
+      "post_single_layer_ppl": null,
+      "post_qlora_ppl": 9.441128189362344,
+      "final_ppl": 9.441128189362344,
+      "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_000_p25_bs7/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_000_p25_bs7-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_000_p25_bs7-analysis_model_aggregate_weighted_mean.csv",
+      "dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_000_p25_bs7"
+    },
+    {
+      "status": "accepted",
+      "step": 1,
+      "percent": 25,
+      "block_size": 5,
+      "selected_original": {
+        "start": 7,
+        "end_incl": 11
+      },
+      "mapped_current": {
+        "start": 7,
+        "end_incl": 11
+      },
+      "replacement": "none",
+      "heal_methods": [
+        "qlora"
+      ],
+      "baseline_ppl": 12.408719142264108,
+      "ppl_limit": 18.613078713396163,
+      "post_prune_ppl": 24.348072883473705,
+      "post_single_layer_ppl": null,
+      "post_qlora_ppl": 12.355495997251909,
+      "final_ppl": 12.355495997251909,
+      "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_001_p25_bs5/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_001_p25_bs5-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_001_p25_bs5-analysis_model_aggregate_weighted_mean.csv",
+      "dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_001_p25_bs5"
+    },
+    {
+      "status": "rejected",
+      "step": 2,
+      "percent": 25,
+      "block_size": 4,
+      "selected_original": {
+        "start": 11,
+        "end_incl": 14
+      },
+      "mapped_current": {
+        "start": 11,
+        "end_incl": 14
+      },
+      "replacement": "none",
+      "heal_methods": [
+        "qlora"
+      ],
+      "baseline_ppl": 12.408719142264108,
+      "ppl_limit": 18.613078713396163,
+      "post_prune_ppl": 167.78903876837126,
+      "post_single_layer_ppl": null,
+      "post_qlora_ppl": 22.1157524742517,
+      "final_ppl": 22.1157524742517,
+      "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_002_p25_bs4/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_002_p25_bs4-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_002_p25_bs4-analysis_model_aggregate_weighted_mean.csv",
+      "dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_002_p25_bs4"
+    },
+    {
+      "status": "accepted",
+      "step": 2,
+      "percent": 12,
+      "block_size": 2,
+      "selected_original": {
+        "start": 13,
+        "end_incl": 14
+      },
+      "mapped_current": {
+        "start": 13,
+        "end_incl": 14
+      },
+      "replacement": "none",
+      "heal_methods": [
+        "qlora"
+      ],
+      "baseline_ppl": 12.408719142264108,
+      "ppl_limit": 18.613078713396163,
+      "post_prune_ppl": 36.4750000525843,
+      "post_single_layer_ppl": null,
+      "post_qlora_ppl": 16.508009719978602,
+      "final_ppl": 16.508009719978602,
+      "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_002_p12_bs2/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_002_p12_bs2-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_002_p12_bs2-analysis_model_aggregate_weighted_mean.csv",
+      "dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_002_p12_bs2"
+    },
+    {
+      "status": "rejected",
+      "step": 3,
+      "percent": 12,
+      "block_size": 2,
+      "selected_original": {
+        "start": 10,
+        "end_incl": 11
+      },
+      "mapped_current": {
+        "start": 10,
+        "end_incl": 11
+      },
+      "replacement": "none",
+      "heal_methods": [
+        "qlora"
+      ],
+      "baseline_ppl": 12.408719142264108,
+      "ppl_limit": 18.613078713396163,
+      "post_prune_ppl": 39.93282641757564,
+      "post_single_layer_ppl": null,
+      "post_qlora_ppl": 21.987190737390357,
+      "final_ppl": 21.987190737390357,
+      "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_003_p12_bs2/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_003_p12_bs2-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_003_p12_bs2-analysis_model_aggregate_weighted_mean.csv",
+      "dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_003_p12_bs2"
+    }
+  ],
+  "experiment_dir": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive"
+}

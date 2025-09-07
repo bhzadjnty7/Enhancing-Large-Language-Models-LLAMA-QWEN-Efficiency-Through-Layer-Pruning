@@ -190,7 +190,7 @@ class LLMLayerPruner:
     ):
         """
         Either provide (model_name) or an already-loaded (model, tokenizer).
-        Results default to: results/pruning/single-shot/<model_slug>
+        Results default to: results/pruning_sweep/single-shot/<model_slug>
         """
         self.model_name = model_name
         self.model = model
@@ -201,7 +201,7 @@ class LLMLayerPruner:
         self.trust_remote_code = trust_remote_code
 
         slug = self._slugify(model_name) if model_name else "model"
-        self.results_dir = results_dir or os.path.join("results", "pruning", "single-shot", slug)
+        self.results_dir = results_dir or os.path.join("results", "pruning_sweep", "single-shot", slug)
         os.makedirs(self.results_dir, exist_ok=True)
 
         # Phase-specific quantization configs (override self.quant_config if set)
@@ -399,7 +399,7 @@ class LLMLayerPruner:
             dtype: Optional[torch.dtype] = None,
     ):
         """
-        Fresh model loader dedicated to the pruning/save step.
+        Fresh model loader dedicated to the pruning_sweep/save step.
         - quantized=False => standard torch_dtype; CPU path forces float32.
         - quantized=True  => use self.quant_config (bnb) if provided.
         """
@@ -555,7 +555,7 @@ class LLMLayerPruner:
         mean_loss = float(np.mean(losses))
         return float(math.exp(mean_loss)) if np.isfinite(mean_loss) else float("inf")
 
-    # --- pruning mechanics ---
+    # --- pruning_sweep mechanics ---
     def _get_layer_container_and_list(self, model):
         if hasattr(model, "model") and hasattr(model.model, "layers"):
             return model.model, model.model.layers
@@ -565,7 +565,7 @@ class LLMLayerPruner:
             return model.transformer, model.transformer.h
         if hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers"):
             return model.gpt_neox, model.gpt_neox.layers
-        raise ValueError("Unsupported architecture for pruning.")
+        raise ValueError("Unsupported architecture for pruning_sweep.")
 
     def prune_without_replacement(self, model, start: int, end_inclusive: int):
         parent, layers = self._get_layer_container_and_list(model)
@@ -1118,7 +1118,7 @@ class LLMLayerPruner:
             "score": float(row["combined_score"].iloc[0]),
         }
 
-    # --- (b) Single-shot pruning sweep: no-replacement + 4 heuristics (pre-heal only) ---
+    # --- (b) Single-shot pruning_sweep sweep: no-replacement + 4 heuristics (pre-heal only) ---
     def run_single_shot_pruning_sweep(
         self,
         eval_dataloader,
@@ -1172,7 +1172,7 @@ class LLMLayerPruner:
                         torch.cuda.empty_cache()
                         torch.cuda.ipc_collect()
                     gc.collect()
-                    # load full-precision for pruning; set on_cpu=True if you want DRAM-only pruning
+                    # load full-precision for pruning_sweep; set on_cpu=True if you want DRAM-only pruning_sweep
                     m = self._fresh_model_for_pruning(quantized=False, on_cpu=False)
                     if strategy == "none":
                         if not sel_none:
@@ -1720,7 +1720,7 @@ class LLMLayerPruner:
         m = self._fresh_model_for_pruning(quantized=False, on_cpu=on_cpu_for_prune)
         if replacement in (None, "none"):
             s, e = sel_none["start"], sel_none["end_incl"]
-            self.prune_without_replacement(m, s, e)                                      # pruning path unchanged :contentReference[oaicite:5]{index=5}
+            self.prune_without_replacement(m, s, e)                                      # pruning_sweep path unchanged :contentReference[oaicite:5]{index=5}
             inserted_idx = None
         else:
             s, e = sel_repl["start"], sel_repl["end_incl"]
@@ -1828,7 +1828,7 @@ class LLMLayerPruner:
 
         return out
 
-    # --- Progressive pruning ---
+    # --- Progressive pruning_sweep ---
     def _save_model_for_analysis(self, model, out_dir: str):
         """
         Save `model` in a HF-loadable dir for analysis.
@@ -1943,7 +1943,7 @@ class LLMLayerPruner:
             final_qlora_try_rejected_first: bool = True,
     ) -> Dict:
         """
-        Progressive pruning with a PPL ceiling. At each step, prune+heal by current percent.
+        Progressive pruning_sweep with a PPL ceiling. At each step, prune+heal by current percent.
         If post-heal PPL > limit, halve percent and retry from the last accepted model.
         Stop when the block to prune falls below `min_block`.
 

@@ -1,0 +1,24 @@
+{
+  "step": 1,
+  "percent": 25,
+  "block_size": 5,
+  "selected_original": {
+    "start": 7,
+    "end_incl": 11
+  },
+  "mapped_current": {
+    "start": 7,
+    "end_incl": 11
+  },
+  "replacement": "none",
+  "heal_methods": [
+    "qlora"
+  ],
+  "baseline_ppl": 12.408719142264108,
+  "ppl_limit": 18.613078713396163,
+  "post_prune_ppl": 24.348072883473705,
+  "post_single_layer_ppl": null,
+  "post_qlora_ppl": 12.355495997251909,
+  "final_ppl": 12.355495997251909,
+  "csv_path": "results/prog_experiment1/qwen-qwen2.5-1.5b/progressive/step_001_p25_bs5/analysis/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_001_p25_bs5-analysis_model/results-prog_experiment1-qwen-qwen2.5-1.5b-progressive-step_001_p25_bs5-analysis_model_aggregate_weighted_mean.csv"
+}

@@ -1,2 +1,0 @@
-method,strategy,percent,selected_start,selected_end_inclusive,ppl_before_heal,ppl_after_heal,delta_ppl,inserted_idx,rank
-weighted_mean,tblock_blank,10,12,15,12.254171656082786,11.150894632570106,-1.10327702351268,12,16

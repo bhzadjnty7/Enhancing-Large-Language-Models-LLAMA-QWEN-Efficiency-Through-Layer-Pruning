@@ -128,7 +128,7 @@ class LayerPruningAnalyzer:
         trust_remote_code: bool = True,
     ):
         """
-        Analyzer for transformer layer pruning similarity.
+        Analyzer for transformer layer pruning_sweep similarity.
 
         Args:
             model_name: HF hub model id
@@ -770,9 +770,9 @@ class LayerPruningAnalyzer:
         print(f"Minimum angular distance: {np.min(distances):.4f}")
         print(f"Maximum angular distance: {np.max(distances):.4f}")
         print(f"Average distance: {np.mean(distances):.4f}")
-        print("\nLayer pruning recommendations (inclusive end indices):")
+        print("\nLayer pruning_sweep recommendations (inclusive end indices):")
         for pct, info in report["pruning_recommendations_mixed_dataset"].items():
-            print(f"\n{pct} pruning:")
+            print(f"\n{pct} pruning_sweep:")
             print(f"  - Layers to remove: {info['layers_to_remove']}")
             print(f"  - Optimal start layer: {info['optimal_start_layer']}")
             print(f"  - Optimal end layer: {info['optimal_end_layer']}")
@@ -804,7 +804,7 @@ class LayerPruningAnalyzer:
 
         Returns: (image_path, json_path, report_dict)
         """
-        print(f"Starting {self.model_name} layer pruning analysis...")
+        print(f"Starting {self.model_name} layer pruning_sweep analysis...")
 
         # 1) Load
         print("\n1. Loading model...")
@@ -1089,7 +1089,7 @@ class LayerPruningAnalyzer:
         df_agg_mean.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_weighted_mean.csv"), index=False)
         df_agg_minimax.to_csv(os.path.join(outdir, f"{self.slug}_aggregate_minimax.csv"), index=False)
 
-        # --------- Update pruning report JSON with aggregate recommendations ---------
+        # --------- Update pruning_sweep report JSON with aggregate recommendations ---------
         try:
             report_path = os.path.join(outdir, f"{self.slug}_pruning_report.json")
             with open(report_path, "r", encoding="utf-8") as f:
@@ -1133,7 +1133,7 @@ class LayerPruningAnalyzer:
 
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
-        print(f"Updated pruning recommendations in {report_path}")
+        print(f"Updated pruning_sweep recommendations in {report_path}")
 
         # print("\nSaved:")
         # for task in tasks:

@@ -59,8 +59,8 @@ The core logic is encapsulated in the `LayerPruningAnalyzer` class. You can run 
 ```python
 # Main function to run a complete analysis
 def main():
-    """Run a complete layer pruning analysis on a model."""
-    print("Starting Llama-3.1-8B layer pruning analysis...")
+    """Run a complete layer pruning_sweep analysis on a model."""
+    print("Starting Llama-3.1-8B layer pruning_sweep analysis...")
 
     # 1. Create the analyzer instance
     analyzer = LayerPruningAnalyzer(        model_name="meta-llama/Llama-3.1-8B",
@@ -76,7 +76,7 @@ def main():
         # 4. Extract hidden state representations from each layer
         analyzer.extract_layer_representations(tokenized_texts, batch_size=1)
 
-        # 5. Analyze layer similarities to find optimal pruning candidates
+        # 5. Analyze layer similarities to find optimal pruning_sweep candidates
         analyzer.analyze_layer_similarities(max_block_size=12)
 
         # 6. Visualize the results and save plots
