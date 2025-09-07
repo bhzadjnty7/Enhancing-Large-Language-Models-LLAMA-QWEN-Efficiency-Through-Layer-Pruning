@@ -1,0 +1,66 @@
+{
+  "pruning_recommendations_weighted_mean_z": {
+    "10%": {
+      "layers_to_remove": 2,
+      "optimal_start_layer": 19,
+      "optimal_end_layer": 20,
+      "combined_z_score": -1.541190470841987
+    },
+    "20%": {
+      "layers_to_remove": 4,
+      "optimal_start_layer": 8,
+      "optimal_end_layer": 11,
+      "combined_z_score": -0.8720142110506642
+    },
+    "30%": {
+      "layers_to_remove": 7,
+      "optimal_start_layer": 6,
+      "optimal_end_layer": 12,
+      "combined_z_score": -0.2555568830325199
+    },
+    "40%": {
+      "layers_to_remove": 9,
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 15,
+      "combined_z_score": 0.0830203150718245
+    },
+    "50%": {
+      "layers_to_remove": 11,
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 17,
+      "combined_z_score": 0.3770509702527612
+    }
+  },
+  "pruning_recommendations_minimax_z": {
+    "10%": {
+      "layers_to_remove": 2,
+      "optimal_start_layer": 18,
+      "optimal_end_layer": 19,
+      "combined_z_score": -0.4868396021814736
+    },
+    "20%": {
+      "layers_to_remove": 4,
+      "optimal_start_layer": 8,
+      "optimal_end_layer": 11,
+      "combined_z_score": -0.2706329940947152
+    },
+    "30%": {
+      "layers_to_remove": 7,
+      "optimal_start_layer": 6,
+      "optimal_end_layer": 12,
+      "combined_z_score": -0.06889522281976099
+    },
+    "40%": {
+      "layers_to_remove": 9,
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 15,
+      "combined_z_score": 0.04435265623747414
+    },
+    "50%": {
+      "layers_to_remove": 11,
+      "optimal_start_layer": 7,
+      "optimal_end_layer": 17,
+      "combined_z_score": 0.13607590957105675
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "origin": "accepted",
+  "adapters_path": "results/prog_experiment-LowPPL/qwen-qwen2.5-1.5b/progressive/final_qlora_accepted_adapters",
+  "final_model_dir": "results/prog_experiment-LowPPL/qwen-qwen2.5-1.5b/progressive/final_qlora_accepted_adapters_merged",
+  "ppl": 10.846144188100116,
+  "ok": true
+}

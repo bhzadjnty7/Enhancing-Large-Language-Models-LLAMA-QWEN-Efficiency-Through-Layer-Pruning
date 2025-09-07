@@ -323,3 +323,4 @@ results/**/vocab.json
 results/**/special_tokens_map.json
 results/**/meta.json
 
+/Speculative-Decoding/

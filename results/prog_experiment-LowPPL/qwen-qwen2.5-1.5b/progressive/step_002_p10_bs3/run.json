@@ -1,0 +1,29 @@
+{
+  "step": 2,
+  "percent": 10,
+  "block_size": 3,
+  "selected_original": {
+    "start": 14,
+    "end_incl": 16
+  },
+  "mapped_current": {
+    "start": 14,
+    "end_incl": 16
+  },
+  "replacement": "tblock_avg",
+  "heal_methods": [
+    "single_layer"
+  ],
+  "baseline_ppl": 11.946708608143059,
+  "ppl_limit": 13.141379468957366,
+  "post_prune_ppl": 50.050603160248535,
+  "post_single_layer_ppl": 17.409628123218756,
+  "post_qlora_ppl": null,
+  "final_ppl": 17.409628123218756,
+  "layers_before": 18,
+  "layers_removed_this_step": 2,
+  "csv_path": "results/prog_experiment-LowPPL/qwen-qwen2.5-1.5b/progressive/step_002_p10_bs3/analysis/results-prog_experiment-lowppl-qwen-qwen2.5-1.5b-progressive-step_002_p10_bs3-analysis_model/results-prog_experiment-lowppl-qwen-qwen2.5-1.5b-progressive-step_002_p10_bs3-analysis_model_aggregate_weighted_mean.csv",
+  "status": "rejected",
+  "layers_pruned_total_so_far": 10,
+  "pruned_percent_total_so_far": 35.714285714285715
+}
