@@ -6,6 +6,12 @@
 
 ---
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)
+![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Transformers-yellow)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Status](https://img.shields.io/badge/Status-Completed-success)
+
 ## 1. Abstract
 
 Large Language Models (LLMs) have demonstrated exceptional capabilities but are notoriously resource-intensive and expensive to deploy. Their autoregressive nature, which requires a full forward pass for every generated token, creates a significant bottleneck due to memory bandwidth limitations. This project combines two state-of-the-art efficiency techniques—**progressive layer pruning** and **speculative decoding**—into a unified, lossless acceleration framework. Our central thesis is that a pruned version of a target LLM serves as an ideal "draft" model for speculative decoding, eliminating the need for a separate, smaller model and ensuring distributional alignment. This repository contains the first phase of this project: a comprehensive analysis tool to identify redundant layers in modern LLMs for optimal pruning.
