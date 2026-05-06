@@ -135,8 +135,12 @@ The Future Work has been completed
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 
-## 👨‍💻 Author
+## 10. Author
 
 **Behzad Jannati**
 M.Sc. Student – Computer Architecture
 University of Tehran
+
+GitHub: [https://github.com/bhzadjnty7](https://github.com/bhzadjnty7)
+
+Linkedin: [www.linkedin.com/in/behzadjannati](www.linkedin.com/in/behzadjannati)
