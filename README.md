@@ -121,9 +121,9 @@ These results confirm that a significant portion of layers can be identified for
 
 This repository currently focuses on the analysis phase. The next steps will build upon these findings to create the full end-to-end acceleration pipeline:
 
--   [ ] **Implement Pruning Functionality:** Add methods to physically remove the identified layers from the model.
--   [ ] **Develop the "Healing" Stage:** Integrate a QLoRA fine-tuning process to restore any performance loss post-pruning.
--   [ ] **Integrate Speculative Decoding:** Use the pruned, healed model as an in-model drafter for the original LLM.
+-   [ ✅ ] **Implement Pruning Functionality:** Add methods to physically remove the identified layers from the model.
+-   [ ✅ ] **Develop the "Healing" Stage:** Integrate a QLoRA fine-tuning process to restore any performance loss post-pruning.
+-   [ ✅ ] **Integrate Speculative Decoding:** Use the pruned, healed model as an in-model drafter for the original LLM.
 -   [ ] **End-to-End Benchmarking:** Rigorously evaluate the final accelerated model on throughput, latency, and task-specific accuracy metrics (SQuAD, GSM8K, etc.).
 -   [ ] **Release Toolkit:** Package the code into an open-source toolkit for the community.
 
