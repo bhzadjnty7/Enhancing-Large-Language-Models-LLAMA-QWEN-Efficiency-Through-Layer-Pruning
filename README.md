@@ -30,7 +30,9 @@ The entire pipeline is visualized below, as proposed in our initial plan:![Proje
 
 *> **Figure 1:** Our end-to-end acceleration pipeline. (1) A similarity scan identifies redundant layers for removal. (2) The pruned model is healed via QLoRA. (3) The healed model acts as a drafter for the full LLM in a speculative decoding loop.*
 
-### Current StatusThis repository currently implements **Part 1: The Layer Pruning Analysis Framework**. The code provides the tools to load popular LLMs, analyze the similarity between their layers, and generate detailed reports recommending which layers are the best candidates for pruning. The implementation of the actual pruning, healing, and speculative decoding stages is planned as future work.
+### * Current StatusThis repository currently implements **Part 1: The Layer Pruning Analysis Framework**. The code provides the tools to load popular LLMs, analyze the similarity between their layers, and generate detailed reports recommending which layers are the best candidates for pruning. The implementation of the actual pruning, healing, and speculative decoding stages is planned as future work.
+
+* update: the pruning and speculative parts of the projects has been completed.
 
 ## 3. Features of the Analysis Framework
 
