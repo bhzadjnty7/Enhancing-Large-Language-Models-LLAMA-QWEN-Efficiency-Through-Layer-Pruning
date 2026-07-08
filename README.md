@@ -139,7 +139,8 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 
 ## 10. Author
 
-**Behzad Jannati**
+**Behzad Jannati** & **Sobhan Abedi**
+
 M.Sc. Student – Computer Architecture
 University of Tehran
 
