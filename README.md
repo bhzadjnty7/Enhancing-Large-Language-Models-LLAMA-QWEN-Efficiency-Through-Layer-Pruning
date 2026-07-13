@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:1a2a6c,50:2a5298,100:00b4d8&height=200&section=header&text=LLM%20Layer%20Pruning%20Project&fontSize=35&fontColor=ffffff&animation=fadeIn&fontAlignY=35"/>
+</p>
+
 # Enhancing Large Language Model Efficiency Through Layer Pruning and Speculative Decoding
 
 **Authors:** Sobhan Abedi, Behzad Jannati, Mahsa Abarghani Aghdam  
